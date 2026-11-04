@@ -304,7 +304,7 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
         transport.addView(rotateButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { leftMargin = dp(6) })
         root.addView(transport)
 
-        val hint = text("DRAG TO LOOK AROUND  •  PINCH TO ZOOM  •  180°/360° MONO EQUIRECTANGULAR", 9f, Color.rgb(119, 125, 136), true).apply {
+        val hint = text("DRAG TO LOOK AROUND  •  PINCH TO ZOOM  •  MONO / 180° / 360° SBS", 9f, Color.rgb(119, 125, 136), true).apply {
             gravity = Gravity.CENTER
             letterSpacing = 0.045f
             setPadding(0, dp(6), 0, dp(2))
@@ -398,8 +398,7 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
             VrVideoSurfaceView.Projection.VR180 -> "180° VIEW"
             VrVideoSurfaceView.Projection.VR360 -> "360° VIEW"
         }
-        modeBadge.text = if (projection != VrVideoSurfaceView.Projection.FLAT &&
-            stereoLayout != VrVideoSurfaceView.StereoLayout.MONO) {
+        modeBadge.text = if (stereoLayout != VrVideoSurfaceView.StereoLayout.MONO) {
             val eyeLabel = if (stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT) "LEFT EYE" else "RIGHT EYE"
             "$projectionLabel · $eyeLabel"
         } else projectionLabel
