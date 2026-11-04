@@ -51,6 +51,7 @@ class MainActivity : Activity() {
     private lateinit var fullscreenButton: TextView
     private lateinit var overlayPlayButton: TextView
     private lateinit var overlaySeekBar: SeekBar
+    private lateinit var fullscreenControls: LinearLayout
     private lateinit var rootLayout: LinearLayout
     private val fullscreenChrome = mutableListOf<View>()
     private var isFullscreen = false
@@ -230,12 +231,12 @@ class MainActivity : Activity() {
         }
         videoFrame.addView(fullscreenButton, fullscreenParams)
 
-        val videoControls = LinearLayout(this).apply {
+        fullscreenControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(5), dp(12), dp(5))
-            background = rounded(Color.argb(205, 8, 10, 14), 14)
-            elevation = dp(6).toFloat()
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            background = null
+            elevation = 0f
         }
         val rewind = transportButton("↶ 10").apply {
             setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
@@ -268,12 +269,32 @@ class MainActivity : Activity() {
                 override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {}
             })
         }
-        videoControls.addView(rewind, LinearLayout.LayoutParams(dp(54), dp(38)))
-        videoControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(54), dp(38)).apply { leftMargin = dp(6) })
-        videoControls.addView(forward, LinearLayout.LayoutParams(dp(54), dp(38)).apply { leftMargin = dp(6) })
-        videoControls.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(38), 1f).apply { leftMargin = dp(8) })
-        videoFrame.addView(videoControls, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
-            setMargins(dp(10), 0, dp(10), dp(10))
+        val fullscreenSeekRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        fullscreenSeekRow.addView(text("00:00", 10f, Color.WHITE, true), LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT))
+        fullscreenSeekRow.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(30), 1f))
+        fullscreenSeekRow.addView(text("00:00", 10f, Color.WHITE, true), LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END })
+        fullscreenControls.orientation = LinearLayout.VERTICAL
+        fullscreenControls.gravity = Gravity.CENTER_HORIZONTAL
+        fullscreenControls.addView(fullscreenSeekRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32)))
+
+        val fullscreenTransport = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        listOf(rewind, overlayPlayButton, forward).forEachIndexed { index, control ->
+            control.background = rounded(Color.argb(85, 12, 14, 18), 22)
+            control.textSize = if (index == 1) 17f else 11f
+            fullscreenTransport.addView(control, LinearLayout.LayoutParams(dp(if (index == 1) 42 else 46), dp(34)).apply {
+                if (index != 0) leftMargin = dp(8)
+            })
+        }
+        fullscreenControls.addView(fullscreenTransport, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)))
+        fullscreenControls.visibility = View.GONE
+        videoFrame.addView(fullscreenControls, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
+            setMargins(dp(14), 0, dp(14), dp(12))
         })
 
         placeholder = LinearLayout(this).apply {
@@ -655,6 +676,7 @@ class MainActivity : Activity() {
     private fun toggleFullscreen() {
         isFullscreen = !isFullscreen
         fullscreenChrome.forEach { it.visibility = if (isFullscreen) View.GONE else View.VISIBLE }
+        fullscreenControls.visibility = if (isFullscreen) View.VISIBLE else View.GONE
         val params = videoFrame.layoutParams as LinearLayout.LayoutParams
         if (isFullscreen) {
             normalVideoMargins[0] = params.topMargin
