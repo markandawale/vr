@@ -31,8 +31,8 @@ class VrVideoSurfaceView @JvmOverloads constructor(
     enum class StereoLayout { MONO, SBS_LEFT, SBS_RIGHT }
 
     interface SurfaceEvents {
-        fun onVideoSurfaceAvailable(surface: Surface)
-        fun onVideoSurfaceDestroyed(surface: Surface)
+        fun onVideoSurfaceAvailable(surfaceTexture: SurfaceTexture)
+        fun onVideoSurfaceDestroyed(surfaceTexture: SurfaceTexture)
     }
 
     var surfaceEvents: SurfaceEvents? = null
@@ -173,7 +173,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             val oldSurface = outputSurface
             val oldTexture = surfaceTexture
             if (oldSurface != null) {
-                mainHandler.post { surfaceEvents?.onVideoSurfaceDestroyed(oldSurface) }
+                mainHandler.post { surfaceEvents?.onVideoSurfaceDestroyed(oldTexture ?: return@post) }
             }
             oldTexture?.release()
             surfaceTexture = SurfaceTexture(oesTextureId).also {
@@ -183,8 +183,8 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 }
             }
             outputSurface = Surface(surfaceTexture)
-            val created = outputSurface!!
-            mainHandler.post { surfaceEvents?.onVideoSurfaceAvailable(created) }
+            val createdTexture = surfaceTexture!!
+            mainHandler.post { surfaceEvents?.onVideoSurfaceAvailable(createdTexture) }
             Matrix.setIdentityM(identityMatrix, 0)
             Matrix.setIdentityM(textureMatrix, 0)
             rebuildMesh()
