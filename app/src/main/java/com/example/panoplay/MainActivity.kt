@@ -763,10 +763,16 @@ class MainActivity : Activity() {
             }
             false
         }
-        videoFrame.setOnTouchListener(tapListener)
-        playerView.setOnTouchListener(tapListener)
-        sphericalPlayerView.setOnTouchListener(tapListener)
-        sphericalView?.setOnTouchListener(tapListener)
+        fun attachTapListener(view: View) {
+            view.setOnTouchListener(tapListener)
+            if (view is ViewGroup) {
+                for (index in 0 until view.childCount) attachTapListener(view.getChildAt(index))
+            }
+        }
+        attachTapListener(videoFrame)
+        attachTapListener(playerView)
+        attachTapListener(sphericalPlayerView)
+        sphericalView?.let { attachTapListener(it) }
     }
 
     @Suppress("DEPRECATION")
