@@ -42,6 +42,10 @@ class MpvVideoSurfaceView @JvmOverloads constructor(
             instance.setOptionString("hwdec", "auto-safe")
             instance.setOptionString("audio-display", "no")
             instance.setOptionString("keep-open", "yes")
+            // mpv-android's reference integration requires one idle cycle before
+            // the first loadfile command is accepted.
+            instance.setOptionString("idle", "once")
+            instance.setOptionString("force-window", "no")
             instance.setOptionString("osd-level", "0")
             eventObserver = object : MPVLib.EventObserver {
                 override fun eventProperty(property: String) {}
@@ -88,7 +92,12 @@ class MpvVideoSurfaceView @JvmOverloads constructor(
             instance.attachSurface(holder.surface)
             instance.setOptionString("force-window", "yes")
             surfaceAttached = true
-            loadPendingFile(instance)
+            if (pendingFile != null) {
+                loadPendingFile(instance)
+            } else {
+                // A recreated Android surface must re-enable mpv's GPU output.
+                instance.setPropertyString("vo", "gpu")
+            }
         } catch (error: Exception) {
             Log.e("PanoPlay", "libmpv surface attach failed", error)
         }
