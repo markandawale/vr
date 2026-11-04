@@ -7,7 +7,6 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.database.Cursor
 import android.graphics.Color
-import android.graphics.SurfaceTexture
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -40,9 +39,6 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
-import org.videolan.libvlc.LibVLC
-import org.videolan.libvlc.Media as VlcMedia
-import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
 import java.util.Locale
 import kotlin.math.sqrt
 
@@ -84,15 +80,10 @@ class MainActivity : Activity() {
     private lateinit var playerView: PlayerView
     private lateinit var sphericalPlayerView: PlayerView
     private var sphericalView: SphericalGLSurfaceView? = null
-    private var vrSurfaceView: VrVideoSurfaceView? = null
-    private var vlc: LibVLC? = null
-    private var vlcPlayer: VlcMediaPlayer? = null
-    private var vlcSurfaceTexture: SurfaceTexture? = null
-    private var vlcSurfaceAttached = false
-    private var useVlcForVr = false
+    private var mpvView: MpvVideoSurfaceView? = null
+    private var useMpvForVr = false
     private var currentVideoUri: Uri? = null
-    private var pendingVlcUri: Uri? = null
-    private var vlcAssetFileDescriptor: AssetFileDescriptor? = null
+    private var mpvAssetFileDescriptor: AssetFileDescriptor? = null
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var titleView: TextView
@@ -302,25 +293,11 @@ class MainActivity : Activity() {
             sphericalPlayerView,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
-        // LibVLC decodes into this SurfaceTexture; our own GL viewer maps it to the 180° sphere.
-        vrSurfaceView = VrVideoSurfaceView(this).apply {
-            visibility = View.GONE
-            surfaceEvents = object : VrVideoSurfaceView.SurfaceEvents {
-                override fun onVideoSurfaceAvailable(surfaceTexture: SurfaceTexture) {
-                    vlcSurfaceTexture = surfaceTexture
-                    attachVlcSurfaceIfReady()
-                }
-                override fun onVideoSurfaceDestroyed(surfaceTexture: SurfaceTexture) {
-                    if (vlcSurfaceTexture === surfaceTexture) {
-                        vlcSurfaceAttached = false
-                        try { vlcPlayer?.vlcVout?.detachViews() } catch (_: Exception) {}
-                        vlcSurfaceTexture = null
-                    }
-                }
-            }
-        }
+        // libmpv renders directly to an Android SurfaceView, avoiding the failed
+        // LibVLC SurfaceTexture/OpenGL producer-consumer bridge.
+        mpvView = MpvVideoSurfaceView(this).apply { visibility = View.GONE }
         videoFrame.addView(
-            vrSurfaceView,
+            mpvView,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
         // Re-evaluate the GL output buffer after the spherical view is measured,
@@ -640,8 +617,8 @@ class MainActivity : Activity() {
     private fun setProjection(projection: VrVideoSurfaceView.Projection) {
         currentProjection = projection
         if (projection == VrVideoSurfaceView.Projection.FLAT) {
-            useVlcForVr = false
-            vrSurfaceView?.visibility = View.GONE
+            useMpvForVr = false
+            mpvView?.visibility = View.GONE
             sphericalPlayerView.visibility = View.GONE
             playerView.visibility = View.VISIBLE
             PlayerView.switchTargetView(player, sphericalPlayerView, playerView)
@@ -651,16 +628,12 @@ class MainActivity : Activity() {
                 player.playWhenReady = true
             }
         } else {
-            useVlcForVr = true
+            useMpvForVr = true
             player.pause()
             playerView.visibility = View.GONE
             sphericalPlayerView.visibility = View.GONE
-            vrSurfaceView?.apply {
-                visibility = View.VISIBLE
-                setProjection(projection)
-                setStereoLayout(stereoLayout)
-            }
-            currentVideoUri?.let { startVlcPlayback(it) }
+            mpvView?.visibility = View.VISIBLE
+            currentVideoUri?.let { loadMpvMedia(it) }
         }
         val projectionLabel = when (projection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
@@ -825,97 +798,38 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun ensureVlcPlayer() {
-        if (vlcPlayer != null) return
-        val engine = LibVLC(this, arrayListOf("--avcodec-hw=any", "--no-drop-late-frames", "--no-skip-frames"))
-        vlc = engine
-        vlcPlayer = VlcMediaPlayer(engine).apply {
-            setEventListener { event ->
-                when (event.type) {
-                    VlcMediaPlayer.Event.Playing -> {
-                        mainHandler.post {
-                            placeholder.visibility = View.GONE
-                            playButton.text = "Ⅱ"
-                            if (::overlayPlayButton.isInitialized) overlayPlayButton.text = "Ⅱ"
-                            updatePlaybackDiagnostics()
-                        }
-                    }
-                    VlcMediaPlayer.Event.Paused, VlcMediaPlayer.Event.Stopped, VlcMediaPlayer.Event.EndReached -> {
-                        mainHandler.post {
-                            playButton.text = "▶"
-                            if (::overlayPlayButton.isInitialized) overlayPlayButton.text = "▶"
-                        }
-                    }
-                    VlcMediaPlayer.Event.EncounteredError -> mainHandler.post {
-                        Toast.makeText(this@MainActivity, "VLC could not play this video", Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
-        }
-    }
-
-    private fun attachVlcSurfaceIfReady() {
-        val texture = vlcSurfaceTexture ?: return
-        val mediaPlayer = vlcPlayer ?: return
-        if (vlcSurfaceAttached) return
+    private fun loadMpvMedia(uri: Uri) {
         try {
-            mediaPlayer.vlcVout.setVideoSurface(texture)
-            mediaPlayer.vlcVout.attachViews()
-            vlcSurfaceAttached = true
-            val uri = pendingVlcUri
-            if (uri != null) {
-                pendingVlcUri = null
-                loadVlcMedia(uri)
-            }
-        } catch (error: Exception) {
-            android.util.Log.e("PanoPlay", "Could not attach LibVLC output surface", error)
-            Toast.makeText(this, "VLC video surface error: ${error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun startVlcPlayback(uri: Uri) {
-        ensureVlcPlayer()
-        pendingVlcUri = uri
-        attachVlcSurfaceIfReady()
-    }
-
-    private fun loadVlcMedia(uri: Uri) {
-        val engine = vlc ?: return
-        val mediaPlayer = vlcPlayer ?: return
-        try {
-            // Resolve Android SAF content:// access in the app process and pass
-            // LibVLC a real descriptor rather than an opaque document URI.
-            mediaPlayer.stop()
-            try { vlcAssetFileDescriptor?.close() } catch (_: Exception) {}
-            vlcAssetFileDescriptor = null
+            mpvView?.pause()
+            try { mpvAssetFileDescriptor?.close() } catch (_: Exception) {}
+            mpvAssetFileDescriptor = null
             val descriptor = contentResolver.openAssetFileDescriptor(uri, "r")
                 ?: throw java.io.FileNotFoundException("Could not open selected video")
-            val media = try { VlcMedia(engine, descriptor) } catch (error: Exception) {
+            val fd = descriptor.fileDescriptor.fd
+            if (fd < 0) {
                 descriptor.close()
-                throw error
+                throw java.io.IOException("Invalid video file descriptor")
             }
-            vlcAssetFileDescriptor = descriptor
-            mediaPlayer.media = media
-            media.release()
-            mediaPlayer.play()
+            mpvAssetFileDescriptor = descriptor
+            mpvView?.playFile("/proc/self/fd/$fd")
             placeholder.visibility = View.VISIBLE
         } catch (error: Exception) {
-            android.util.Log.e("PanoPlay", "LibVLC could not open selected video URI: $uri", error)
-            Toast.makeText(this, "VLC input error: ${error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+            android.util.Log.e("PanoPlay", "libmpv could not open selected video URI: $uri", error)
+            Toast.makeText(this, "mpv input error: ${error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
         }
     }
 
-    private fun activeIsPlaying(): Boolean = if (useVlcForVr) vlcPlayer?.isPlaying == true else player.isPlaying
-    private fun activePosition(): Long = if (useVlcForVr) (vlcPlayer?.time ?: 0L).coerceAtLeast(0L) else player.currentPosition.coerceAtLeast(0L)
-    private fun activeDuration(): Long = if (useVlcForVr) (vlcPlayer?.length ?: 0L).coerceAtLeast(0L) else player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+    private fun activeIsPlaying(): Boolean = if (useMpvForVr) mpvView?.isPlaying() == true else player.isPlaying
+    private fun activePosition(): Long = if (useMpvForVr) mpvView?.positionMs() ?: 0L else player.currentPosition.coerceAtLeast(0L)
+    private fun activeDuration(): Long = if (useMpvForVr) mpvView?.durationMs() ?: 0L else player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
     private fun seekActive(positionMs: Long) {
-        if (useVlcForVr) vlcPlayer?.time = positionMs else player.seekTo(positionMs)
+        if (useMpvForVr) mpvView?.seekTo(positionMs) else player.seekTo(positionMs)
     }
     private fun playActive() {
-        if (useVlcForVr) vlcPlayer?.play() else player.play()
+        if (useMpvForVr) mpvView?.play() else player.play()
     }
     private fun pauseActive() {
-        if (useVlcForVr) vlcPlayer?.pause() else player.pause()
+        if (useMpvForVr) mpvView?.pause() else player.pause()
     }
 
     private fun updateModeChips() {
@@ -959,7 +873,7 @@ class MainActivity : Activity() {
         setProjection(VrVideoSurfaceView.Projection.VR180)
         titleView.text = currentVideoName
         placeholder.visibility = View.VISIBLE
-        // The default 180° mode is handled by LibVLC; Flat 2D remains on Media3.
+        // Experimental 180° playback uses libmpv; Flat 2D remains on Media3.
     }
 
     private fun queryDisplayName(uri: Uri): String {
@@ -1091,14 +1005,12 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onResume()
-        vrSurfaceView?.onResume()
-        attachVlcSurfaceIfReady()
+        // libmpv reattaches when Android recreates the SurfaceView surface.
     }
 
     override fun onPause() {
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onPause()
-        vrSurfaceView?.onPause()
-        if (useVlcForVr) vlcPlayer?.pause() else if (::player.isInitialized) player.pause()
+        if (useMpvForVr) mpvView?.pause() else if (::player.isInitialized) player.pause()
         super.onPause()
     }
 
@@ -1107,11 +1019,9 @@ class MainActivity : Activity() {
         if (::playerView.isInitialized) playerView.player = null
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.player = null
         if (::player.isInitialized) player.release()
-        try { vlcPlayer?.vlcVout?.detachViews() } catch (_: Exception) {}
-        try { vlcAssetFileDescriptor?.close() } catch (_: Exception) {}
-        vlcAssetFileDescriptor = null
-        vlcPlayer?.release()
-        vlc?.release()
+        mpvView?.release()
+        try { mpvAssetFileDescriptor?.close() } catch (_: Exception) {}
+        mpvAssetFileDescriptor = null
         super.onDestroy()
     }
 
