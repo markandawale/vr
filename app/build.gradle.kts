@@ -27,6 +27,6 @@ android {
 dependencies {
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-ui:1.11.1")
-    // Experimental alternate decoder/rendering engine for panoramic playback.
-    implementation("org.videolan.android:libvlc-all:3.7.0")
+    // Experimental libmpv playback engine for panoramic playback.
+    implementation("io.github.makd:libmpv:1.1.0")
 }
