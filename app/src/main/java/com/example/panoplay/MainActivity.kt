@@ -32,6 +32,9 @@ import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
 import java.util.Locale
@@ -128,7 +131,29 @@ class MainActivity : Activity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        player = ExoPlayer.Builder(this).build()
+        // Prefer device hardware decoders (especially important for high-resolution
+        // panoramic streams), while retaining Media3's software fallback when the
+        // device has no hardware implementation for a codec.
+        val renderersFactory = DefaultRenderersFactory(this)
+            .setEnableDecoderFallback(true)
+            .setMediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
+                MediaCodecSelector.DEFAULT
+                    .getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder)
+                    .sortedWith(compareBy({ it.softwareOnly }, { !it.hardwareAccelerated }))
+            }
+        // Keep enough compressed data queued to ride through short storage/IO stalls
+        // without adding an excessive startup delay.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                15_000, // minimum buffer
+                50_000, // maximum buffer
+                1_000,  // start playback
+                3_000   // resume after rebuffer
+            )
+            .build()
+        player = ExoPlayer.Builder(this, renderersFactory)
+            .setLoadControl(loadControl)
+            .build()
         buildInterface()
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
