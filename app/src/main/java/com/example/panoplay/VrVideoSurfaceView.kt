@@ -15,7 +15,6 @@ import android.os.Looper
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
-import java.util.concurrent.atomic.AtomicBoolean
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.PI
@@ -52,7 +51,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         setEGLContextClientVersion(2)
         setPreserveEGLContextOnPause(true)
         setRenderer(this)
-        renderMode = RENDERMODE_WHEN_DIRTY
+        renderMode = RENDERMODE_CONTINUOUSLY
         setBackgroundColor(0xFF050608.toInt())
         isClickable = true
     }
@@ -115,7 +114,6 @@ class VrVideoSurfaceView @JvmOverloads constructor(
     }
 
     private inner class VideoRenderer : SurfaceTexture.OnFrameAvailableListener {
-        private val framePending = AtomicBoolean(false)
         private var oesTextureId = 0
         private var surfaceTexture: SurfaceTexture? = null
         private var outputSurface: Surface? = null
@@ -187,13 +185,15 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         fun onDrawFrame() {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             val st = surfaceTexture ?: return
-            if (framePending.compareAndSet(true, false)) {
-                try {
-                    st.updateTexImage()
-                    st.getTransformMatrix(textureMatrix)
-                } catch (_: RuntimeException) {
-                    return
-                }
+            // Consume the latest decoded frame on every GL draw. Some device/driver
+            // combinations coalesce SurfaceTexture callbacks; continuous rendering
+            // prevents the viewer from remaining on its initial black frame.
+            try {
+                st.updateTexImage()
+                st.getTransformMatrix(textureMatrix)
+            } catch (_: RuntimeException) {
+                // No frame is queued yet, or the producer is being recreated.
+                // Keep drawing the last valid frame / clear color and try next frame.
             }
             GLES20.glUseProgram(program)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -241,7 +241,6 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         }
 
         override fun onFrameAvailable(surfaceTexture: SurfaceTexture?) {
-            framePending.set(true)
             this@VrVideoSurfaceView.requestRender()
         }
 
