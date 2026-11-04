@@ -18,8 +18,8 @@
 
 //!PARAM source_projection
 //!TYPE ENUM int
-180
-360
+half_equirectangular
+equirectangular
 
 //!PARAM eye
 //!TYPE ENUM int
@@ -51,7 +51,7 @@ vec4 hook() {
     float lon = atan(d.x, d.z);
     float lat = asin(clamp(d.y, -1.0, 1.0));
     float u;
-    if (source_projection == 180) {
+    if (source_projection == half_equirectangular) {
         if (abs(lon) > PI * 0.5)
             return vec4(0.0, 0.0, 0.0, 1.0);
         u = (lon + PI * 0.5) / PI;
