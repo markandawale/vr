@@ -97,7 +97,17 @@ class MainActivity : Activity() {
 
             override fun onRenderedFirstFrame() {
                 if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
-                    queueSphericalProjection(currentProjection, stereoLayout)
+                    val projection = currentProjection
+                    val layout = stereoLayout
+                    queueSphericalProjection(projection, layout)
+                    // SurfaceTexture delivery and the spherical GL draw happen on
+                    // different threads. Re-apply after the first metadata frame has
+                    // been consumed so its default mesh cannot replace the chosen one.
+                    mainHandler.postDelayed({
+                        if (currentProjection == projection && stereoLayout == layout) {
+                            queueSphericalProjection(projection, layout)
+                        }
+                    }, 300L)
                 }
             }
 
