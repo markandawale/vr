@@ -805,7 +805,7 @@ class MainActivity : Activity() {
             mpvAssetFileDescriptor = null
             val descriptor = contentResolver.openAssetFileDescriptor(uri, "r")
                 ?: throw java.io.FileNotFoundException("Could not open selected video")
-            val fd = descriptor.fileDescriptor.fd
+            val fd = descriptor.parcelFileDescriptor.fd
             if (fd < 0) {
                 descriptor.close()
                 throw java.io.IOException("Invalid video file descriptor")
