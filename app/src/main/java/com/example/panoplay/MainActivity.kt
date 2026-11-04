@@ -102,7 +102,11 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
                 // 16:9 frame. Select the left eye automatically as a useful
                 // starting view; users can switch to mono or the right eye.
                 val sourceAspect = videoSize.width.toFloat() / videoSize.height.coerceAtLeast(1)
-                val detectedStereo = if (sourceAspect >= 2.4f) {
+                // 180° SBS commonly has a 2:1 full-frame aspect ratio
+                // (two square eye images), while 360° SBS is often wider.
+                // This is only a starting guess; the MONO button remains
+                // available for ordinary 2:1 equirectangular videos.
+                val detectedStereo = if (sourceAspect >= 1.95f) {
                     VrVideoSurfaceView.StereoLayout.SBS_LEFT
                 } else {
                     VrVideoSurfaceView.StereoLayout.MONO
@@ -372,8 +376,7 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
 
     private fun setProjection(projection: VrVideoSurfaceView.Projection) {
         currentProjection = projection
-        val useGlOutput = projection != VrVideoSurfaceView.Projection.FLAT ||
-            stereoLayout != VrVideoSurfaceView.StereoLayout.MONO
+        val useGlOutput = shouldUseGlOutput()
         if (!useGlOutput) {
             // Ordinary mono flat video stays on Media3's standard SurfaceView.
             attachedSurface?.let { if (it.isValid) player.clearVideoSurface(it) }
@@ -467,6 +470,10 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
         rotateButton.text = if (isLandscape) "PORTRAIT" else "ROTATE"
     }
 
+    private fun shouldUseGlOutput(): Boolean =
+        currentProjection != VrVideoSurfaceView.Projection.FLAT ||
+            stereoLayout != VrVideoSurfaceView.StereoLayout.MONO
+
     override fun onVideoSurfaceAvailable(surface: android.view.Surface) {
         if (attachedSurface !== surface) {
             attachedSurface?.let {
@@ -475,7 +482,9 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
             }
             attachedSurface = surface
         }
-        if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+        // Flat SBS is rendered by GLSurfaceView too. Do not gate attachment
+        // on projection alone or the GL view remains black in Flat SBS mode.
+        if (shouldUseGlOutput() && surface.isValid) {
             player.setVideoSurface(surface)
         }
     }
