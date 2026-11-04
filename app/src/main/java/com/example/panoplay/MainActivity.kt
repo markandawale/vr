@@ -110,8 +110,8 @@ class MainActivity : Activity() {
     private val progressUpdater = object : Runnable {
         override fun run() {
             if (::player.isInitialized) {
-                val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
-                val position = player.currentPosition.coerceAtLeast(0L)
+                val duration = activeDurationMs()
+                val position = activePositionMs()
                 if (!isScrubbing) {
                     seekBar.max = 1000
                     seekBar.progress = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
@@ -307,20 +307,16 @@ class MainActivity : Activity() {
             elevation = 0f
         }
         val rewind = transportButton("↶ 10").apply {
-            setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
+            setOnClickListener { seekRelative(-10_000L) }
         }
         overlayPlayButton = transportButton("▶", true).apply {
             setOnClickListener {
-                if (player.isPlaying) player.pause() else {
-                    if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
-                    player.play()
-                }
+                toggleActivePlayback()
             }
         }
         val forward = transportButton("10 ↷").apply {
             setOnClickListener {
-                val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-                player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
+                seekRelative(10_000L)
             }
         }
         overlaySeekBar = SeekBar(this).apply {
@@ -454,15 +450,13 @@ class MainActivity : Activity() {
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onStartTrackingTouch(seekBar: SeekBar?) { isScrubbing = true }
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    val duration = player.duration
-                    if (duration != C.TIME_UNSET && duration > 0L) {
-                        player.seekTo((this@MainActivity.seekBar.progress / 1000f * duration).toLong())
-                    }
+                    val duration = activeDurationMs()
+                    if (duration > 0L) seekActiveTo((this@MainActivity.seekBar.progress / 1000f * duration).toLong())
                     isScrubbing = false
                 }
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (fromUser) {
-                        val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+                        val duration = activeDurationMs()
                         currentTimeView.text = formatTime((duration * progress) / 1000L)
                     }
                 }
@@ -565,7 +559,7 @@ class MainActivity : Activity() {
             setOnClickListener {
                 stereoLayout = layout
                 updateModeChips()
-                setProjection(currentProjection)
+                if (currentProjection != VrVideoSurfaceView.Projection.FLAT) updateMpvShaderOptions()
                 if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
                     val projectionLabel = if (currentProjection == VrVideoSurfaceView.Projection.VR180) "180° VIEW" else "360° VIEW"
                     val eyeLabel = when (layout) {
@@ -609,7 +603,7 @@ class MainActivity : Activity() {
             VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "LEFT EYE"
             VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "RIGHT EYE"
         }
-        modeBadge.text = if (projection == VrVideoSurfaceView.Projection.FLAT) projectionLabel else "$" + "projectionLabel · $" + "eyeLabel"
+        modeBadge.text = if (projection == VrVideoSurfaceView.Projection.FLAT) projectionLabel else "${projectionLabel} · ${eyeLabel}"
         updateModeChips()
     }
 
@@ -642,7 +636,7 @@ class MainActivity : Activity() {
             VrVideoSurfaceView.StereoLayout.MONO, VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "left"
             VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "right"
         }
-        val params = "yaw=$" + "mpvYaw,pitch=$" + "mpvPitch,fov=1.745329252,source_projection=$" + "projectionName,eye=$" + "eyeName"
+        val params = "yaw=${mpvYaw},pitch=${mpvPitch},fov=1.745329252,source_projection=${projectionName},eye=${eyeName}"
         engine.command(arrayOf("no-osd", "change-list", "glsl-shader-opts", "set", params))
     }
 
@@ -653,7 +647,7 @@ class MainActivity : Activity() {
             val descriptor = contentResolver.openFileDescriptor(uri, "r") ?: throw IllegalStateException("Cannot open video")
             try { mpvDescriptor?.close() } catch (_: Exception) { }
             mpvDescriptor = descriptor
-            val path = "/proc/self/fd/$" + "{descriptor.fd}"
+            val path = "/proc/self/fd/${descriptor.fd}"
             pendingMpvPath = path
             mpvLoadedUri = uri.toString()
             if (mpvSurfaceView.holder.surface.isValid) {
@@ -720,9 +714,13 @@ class MainActivity : Activity() {
         setProjection(VrVideoSurfaceView.Projection.VR180)
         titleView.text = currentVideoName
         placeholder.visibility = View.VISIBLE
-        player.setMediaItem(MediaItem.fromUri(uri))
-        player.prepare()
-        player.playWhenReady = true
+        if (currentProjection == VrVideoSurfaceView.Projection.FLAT) {
+            player.setMediaItem(MediaItem.fromUri(uri))
+            player.prepare()
+            player.playWhenReady = true
+        } else {
+            loadMpvUri(uri)
+        }
     }
 
     private fun queryDisplayName(uri: Uri): String {
@@ -853,12 +851,11 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onResume()
     }
 
     override fun onPause() {
-        if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onPause()
         if (::player.isInitialized) player.pause()
+        try { mpv?.setPropertyBoolean("pause", true) } catch (_: Exception) { }
         super.onPause()
     }
 
@@ -867,6 +864,10 @@ class MainActivity : Activity() {
         if (::playerView.isInitialized) playerView.player = null
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.player = null
         if (::player.isInitialized) player.release()
+        try { mpv?.destroy() } catch (_: Exception) { }
+        mpv = null
+        try { mpvDescriptor?.close() } catch (_: Exception) { }
+        mpvDescriptor = null
         super.onDestroy()
     }
 
