@@ -243,9 +243,11 @@ class MainActivity : Activity() {
         monoChip = stereoChip("MONO", VrVideoSurfaceView.StereoLayout.MONO)
         leftEyeChip = stereoChip("SBS LEFT", VrVideoSurfaceView.StereoLayout.SBS_LEFT)
         rightEyeChip = stereoChip("SBS RIGHT", VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
+        // The Media3 spherical renderer selects the left half for phone viewing.
+        // Hide the right-eye option until a true right-eye texture override is added.
         stereoRow.addView(monoChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { rightMargin = dp(4) })
-        stereoRow.addView(leftEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
-        stereoRow.addView(rightEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4) })
+        stereoRow.addView(leftEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4) })
+        rightEyeChip.visibility = View.GONE
         root.addView(stereoRow)
 
         val seekRow = LinearLayout(this).apply {
@@ -397,9 +399,9 @@ class MainActivity : Activity() {
             VrVideoSurfaceView.Projection.VR180 -> "180° VIEW"
             VrVideoSurfaceView.Projection.VR360 -> "360° VIEW"
         }
-        modeBadge.text = if (stereoLayout != VrVideoSurfaceView.StereoLayout.MONO) {
-            val eyeLabel = if (stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT) "LEFT EYE" else "RIGHT EYE"
-            "$projectionLabel · $eyeLabel"
+        modeBadge.text = if (projection != VrVideoSurfaceView.Projection.FLAT &&
+            stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT) {
+            "$projectionLabel · LEFT EYE"
         } else projectionLabel
         updateModeChips()
     }
