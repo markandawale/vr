@@ -123,7 +123,7 @@ class MainActivity : Activity() {
                 } else {
                     VrVideoSurfaceView.StereoLayout.MONO
                 }
-                if (stereoLayout != detectedStereo) {
+                if (!stereoLayoutManuallySelected && stereoLayout != detectedStereo) {
                     stereoLayout = detectedStereo
                     updateModeChips()
                     if (currentProjection != VrVideoSurfaceView.Projection.FLAT) setProjection(currentProjection)
@@ -363,12 +363,14 @@ class MainActivity : Activity() {
     private lateinit var leftEyeChip: TextView
     private lateinit var rightEyeChip: TextView
     private var stereoLayout = VrVideoSurfaceView.StereoLayout.MONO
+    private var stereoLayoutManuallySelected = false
 
     private fun stereoChip(label: String, layout: VrVideoSurfaceView.StereoLayout): TextView =
         text(label, 10f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setOnClickListener {
                 stereoLayout = layout
+                stereoLayoutManuallySelected = true
                 updateModeChips()
                 setProjection(currentProjection)
                 if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
@@ -539,6 +541,9 @@ class MainActivity : Activity() {
             // Some document providers do not offer persistable permissions.
         }
         currentVideoName = queryDisplayName(uri).ifBlank { "Selected video" }
+        stereoLayoutManuallySelected = false
+        stereoLayout = VrVideoSurfaceView.StereoLayout.MONO
+        updateModeChips()
         titleView.text = currentVideoName
         placeholder.visibility = View.VISIBLE
         player.setMediaItem(MediaItem.fromUri(uri))
