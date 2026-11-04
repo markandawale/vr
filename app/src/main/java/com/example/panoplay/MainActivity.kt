@@ -155,22 +155,6 @@ class MainActivity : Activity() {
                 }
             }
 
-            override fun onRenderedFirstFrame() {
-                if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
-                    val projection = currentProjection
-                    val layout = stereoLayout
-                    queueSphericalProjection(projection, layout)
-                    // SurfaceTexture delivery and the spherical GL draw happen on
-                    // different threads. Re-apply after the first metadata frame has
-                    // been consumed so its default mesh cannot replace the chosen one.
-                    mainHandler.postDelayed({
-                        if (currentProjection == projection && stereoLayout == layout) {
-                            queueSphericalProjection(projection, layout)
-                        }
-                    }, 300L)
-                }
-            }
-
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 val rotated = videoSize.unappliedRotationDegrees == 90 || videoSize.unappliedRotationDegrees == 270
                 val displayWidth = if (rotated) videoSize.height else videoSize.width
@@ -236,8 +220,6 @@ class MainActivity : Activity() {
         sphericalPlayerView = LayoutInflater.from(this).inflate(
             R.layout.spherical_video_player, videoFrame, false
         ) as PlayerView
-        sphericalView = sphericalPlayerView.videoSurfaceView as? SphericalGLSurfaceView
-        sphericalView?.setUseSensorRotation(false)
         sphericalPlayerView.visibility = View.GONE
         videoFrame.addView(
             sphericalPlayerView,
@@ -328,7 +310,7 @@ class MainActivity : Activity() {
                 override fun onStartTrackingTouch(bar: SeekBar?) { isScrubbing = true }
                 override fun onStopTrackingTouch(bar: SeekBar?) {
                     val d = player.duration
-                    if (d != C.TIME_UNSET && d > 0L) player.seekTo(progress * d / 1000L)
+                    if (d > 0L) seekActiveTo(progress * d / 1000L)
                     isScrubbing = false
                 }
                 override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {}
@@ -478,20 +460,16 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setPadding(0, dp(4), 0, dp(5))
         }
-        val backButton = transportButton("↶ 10").apply { setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) } }
+        val backButton = transportButton("↶ 10").apply { setOnClickListener { seekRelative(-10_000L) } }
         playButton = transportButton("▶", true).apply {
             textSize = 20f
             setOnClickListener {
-                if (player.isPlaying) player.pause() else {
-                    if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
-                    player.play()
-                }
+                toggleActivePlayback()
             }
         }
         val forwardButton = transportButton("10 ↷").apply {
             setOnClickListener {
-                val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-                player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
+                seekRelative(10_000L)
             }
         }
         // Give both skip controls identical widths and symmetric spacing so their
