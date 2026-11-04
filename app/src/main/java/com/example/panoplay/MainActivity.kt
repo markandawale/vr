@@ -437,12 +437,15 @@ class MainActivity : Activity() {
                 val baseProjection = factory.invoke(
                     null, 50f, 36, 72, 180f, horizontalFov, C.STEREO_MODE_MONO
                 )
-                val sourceMesh = projectionClass.getField("leftMesh").get(baseProjection)
+                val sourceMeshField = projectionClass.getField("leftMesh").apply { isAccessible = true }
+                val sourceMesh = sourceMeshField.get(baseProjection)
                 val meshClass = Class.forName(meshClassName)
                 val subMeshClass = Class.forName(subMeshClassName)
-                val sourceSubMesh = meshClass.getMethod("getSubMesh", intType).invoke(sourceMesh, 0)
+                val getSubMesh = meshClass.getMethod("getSubMesh", intType).apply { isAccessible = true }
+                val sourceSubMesh = getSubMesh.invoke(sourceMesh, 0)
 
-                val textureCoords = (subMeshClass.getField("textureCoords").get(sourceSubMesh) as FloatArray).clone()
+                val textureCoordsField = subMeshClass.getField("textureCoords").apply { isAccessible = true }
+                val textureCoords = (textureCoordsField.get(sourceSubMesh) as FloatArray).clone()
                 val cropStart = when (layout) {
                     VrVideoSurfaceView.StereoLayout.MONO,
                     VrVideoSurfaceView.StereoLayout.SBS_LEFT -> 0f
@@ -453,20 +456,24 @@ class MainActivity : Activity() {
                     textureCoords[i] = cropStart + textureCoords[i] * cropWidth
                 }
 
+                val textureIdField = subMeshClass.getField("textureId").apply { isAccessible = true }
+                val verticesField = subMeshClass.getField("vertices").apply { isAccessible = true }
+                val modeField = subMeshClass.getField("mode").apply { isAccessible = true }
                 val subMeshConstructor = subMeshClass.getConstructor(
                     intType, FloatArray::class.java, FloatArray::class.java, intType
-                )
+                ).apply { isAccessible = true }
                 val selectedSubMesh = subMeshConstructor.newInstance(
-                    subMeshClass.getField("textureId").getInt(sourceSubMesh),
-                    subMeshClass.getField("vertices").get(sourceSubMesh) as FloatArray,
+                    textureIdField.getInt(sourceSubMesh),
+                    verticesField.get(sourceSubMesh) as FloatArray,
                     textureCoords,
-                    subMeshClass.getField("mode").getInt(sourceSubMesh)
+                    modeField.getInt(sourceSubMesh)
                 )
                 val subMeshArray = java.lang.reflect.Array.newInstance(subMeshClass, 1)
                 java.lang.reflect.Array.set(subMeshArray, 0, selectedSubMesh)
-                val selectedMesh = meshClass.getConstructor(subMeshArray.javaClass).newInstance(subMeshArray)
-                val selectedProjection = projectionClass.getConstructor(meshClass, intType)
-                    .newInstance(selectedMesh, C.STEREO_MODE_MONO)
+                val meshConstructor = meshClass.getConstructor(subMeshArray.javaClass).apply { isAccessible = true }
+                val selectedMesh = meshConstructor.newInstance(subMeshArray)
+                val projectionConstructor = projectionClass.getConstructor(meshClass, intType).apply { isAccessible = true }
+                val selectedProjection = projectionConstructor.newInstance(selectedMesh, C.STEREO_MODE_MONO)
 
                 val sceneField = view.javaClass.getDeclaredField("scene").apply { isAccessible = true }
                 val scene = sceneField.get(view)
