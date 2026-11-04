@@ -295,7 +295,14 @@ class MainActivity : Activity() {
         )
         // libmpv renders directly to an Android SurfaceView, avoiding the failed
         // LibVLC SurfaceTexture/OpenGL producer-consumer bridge.
-        mpvView = MpvVideoSurfaceView(this).apply { visibility = View.GONE }
+        mpvView = MpvVideoSurfaceView(this).apply {
+            visibility = View.GONE
+            onFileLoaded = {
+                placeholder.visibility = View.GONE
+                playButton.text = "Ⅱ"
+                if (::overlayPlayButton.isInitialized) overlayPlayButton.text = "Ⅱ"
+            }
+        }
         videoFrame.addView(
             mpvView,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -666,7 +673,11 @@ class MainActivity : Activity() {
             VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "LEFT"
             VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "RIGHT"
         }
-        modeBadge.text = "$projectionLabel $eyeLabel · $activeVideoSize · N:$normalDroppedFrames F:$fullscreenDroppedFrames · $activeVideoDecoder · HW AVC:$avcHardwareDecoders HEVC:$hevcHardwareDecoders AV1:$av1HardwareDecoders"
+        modeBadge.text = if (useMpvForVr) {
+            "$projectionLabel $eyeLabel · mpv"
+        } else {
+            "$projectionLabel $eyeLabel · $activeVideoSize · N:$normalDroppedFrames F:$fullscreenDroppedFrames · $activeVideoDecoder · HW AVC:$avcHardwareDecoders HEVC:$hevcHardwareDecoders AV1:$av1HardwareDecoders"
+        }
     }
 
     private fun updateSphericalSurfaceBufferSize() {
