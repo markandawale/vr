@@ -1,6 +1,7 @@
 package com.example.panoplay
 
 import android.content.Context
+import android.content.res.AssetFileDescriptor
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -91,6 +92,7 @@ class MainActivity : Activity() {
     private var useVlcForVr = false
     private var currentVideoUri: Uri? = null
     private var pendingVlcUri: Uri? = null
+    private var vlcAssetFileDescriptor: AssetFileDescriptor? = null
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var titleView: TextView
@@ -881,15 +883,25 @@ class MainActivity : Activity() {
         val engine = vlc ?: return
         val mediaPlayer = vlcPlayer ?: return
         try {
+            // Resolve Android SAF content:// access in the app process and pass
+            // LibVLC a real descriptor rather than an opaque document URI.
             mediaPlayer.stop()
-            val media = VlcMedia(engine, uri)
+            try { vlcAssetFileDescriptor?.close() } catch (_: Exception) {}
+            vlcAssetFileDescriptor = null
+            val descriptor = contentResolver.openAssetFileDescriptor(uri, "r")
+                ?: throw java.io.FileNotFoundException("Could not open selected video")
+            val media = try { VlcMedia(engine, descriptor) } catch (error: Exception) {
+                descriptor.close()
+                throw error
+            }
+            vlcAssetFileDescriptor = descriptor
             mediaPlayer.media = media
             media.release()
             mediaPlayer.play()
             placeholder.visibility = View.VISIBLE
         } catch (error: Exception) {
-            android.util.Log.e("PanoPlay", "LibVLC playback failed", error)
-            Toast.makeText(this, "VLC playback error: ${error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+            android.util.Log.e("PanoPlay", "LibVLC could not open selected video URI: $uri", error)
+            Toast.makeText(this, "VLC input error: ${error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1096,6 +1108,8 @@ class MainActivity : Activity() {
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.player = null
         if (::player.isInitialized) player.release()
         try { vlcPlayer?.vlcVout?.detachViews() } catch (_: Exception) {}
+        try { vlcAssetFileDescriptor?.close() } catch (_: Exception) {}
+        vlcAssetFileDescriptor = null
         vlcPlayer?.release()
         vlc?.release()
         super.onDestroy()
