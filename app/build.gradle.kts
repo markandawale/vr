@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.panoplay"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 36
         versionCode = 2
         versionName = "1.0.1"
@@ -27,4 +27,5 @@ android {
 dependencies {
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-ui:1.11.1")
+    implementation("io.github.makd:libmpv:1.1.0")
 }
