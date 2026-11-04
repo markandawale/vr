@@ -242,6 +242,38 @@ class MainActivity : Activity() {
             sphericalPlayerView,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
+        mpvSurfaceView = MpvSurfaceView(this).apply {
+            visibility = View.GONE
+            engine = mpv
+            onSurfaceReady = {
+                pendingMpvPath?.let { path ->
+                    updateMpvShaderOptions()
+                    mpv?.command(arrayOf("loadfile", path, "replace"))
+                    pendingMpvPath = null
+                }
+            }
+        }
+        videoFrame.addView(mpvSurfaceView, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        var lastTouchX = 0f
+        var lastTouchY = 0f
+        mpvSurfaceView.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { lastTouchX = event.x; lastTouchY = event.y; true }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.x - lastTouchX
+                    val dy = event.y - lastTouchY
+                    lastTouchX = event.x; lastTouchY = event.y
+                    mpvYaw = (mpvYaw - dx * 0.004).coerceIn(-Math.PI, Math.PI)
+                    mpvPitch = (mpvPitch + dy * 0.004).coerceIn(-Math.PI / 2, Math.PI / 2)
+                    updateMpvShaderOptions()
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> true
+                else -> true
+            }
+        }
 
         val viewBadge = text("FLAT 2D", 10f, Color.WHITE, true).apply {
             setPadding(dp(12), dp(7), dp(12), dp(7))
