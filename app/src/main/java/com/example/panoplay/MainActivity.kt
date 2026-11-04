@@ -28,10 +28,13 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
@@ -98,6 +101,8 @@ class MainActivity : Activity() {
     private var normalDroppedFrames = 0
     private var fullscreenDroppedFrames = 0
     private var activeVideoDecoder = "unknown"
+    private var activeVideoSize = "size unknown"
+    private var av1HardwareDecoders = "checking"
     private var fullscreenControlsVisible = true
     private var normalRootPadding = intArrayOf(0, 0, 0, 0)
     private var normalVideoMargins = intArrayOf(0, 0)
@@ -136,7 +141,25 @@ class MainActivity : Activity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        player = ExoPlayer.Builder(this).build()
+        val codecSelector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
+            MediaCodecSelector.DEFAULT.getDecoderInfos(
+                mimeType, requiresSecureDecoder, requiresTunnelingDecoder
+            ).sortedWith(
+                compareByDescending<androidx.media3.exoplayer.mediacodec.MediaCodecInfo> { it.hardwareAccelerated }
+                    .thenByDescending { it.vendor }
+            )
+        }
+        val renderersFactory = DefaultRenderersFactory(this)
+            .setMediaCodecSelector(codecSelector)
+        player = ExoPlayer.Builder(this, renderersFactory).build()
+        av1HardwareDecoders = try {
+            MediaCodecSelector.DEFAULT.getDecoderInfos(MimeTypes.VIDEO_AV1, false, false)
+                .filter { it.hardwareAccelerated }
+                .joinToString { it.name }
+                .ifBlank { "none" }
+        } catch (error: Exception) {
+            "query failed"
+        }
         player.addAnalyticsListener(object : AnalyticsListener {
             override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
                 if (isFullscreen) fullscreenDroppedFrames += droppedFrames else normalDroppedFrames += droppedFrames
@@ -191,6 +214,8 @@ class MainActivity : Activity() {
                 val displayWidth = if (rotated) videoSize.height else videoSize.width
                 val displayHeight = if (rotated) videoSize.width else videoSize.height
                 sourceAspectRatio = displayWidth * videoSize.pixelWidthHeightRatio / displayHeight.coerceAtLeast(1)
+                activeVideoSize = "${displayWidth}x${displayHeight}"
+                updatePlaybackDiagnostics()
                 // Keep the user's selected/default eye layout. Do not auto-switch
                 // SBS LEFT to MONO based on aspect ratio: 180° SBS files can be 2:1.
             }
@@ -622,7 +647,7 @@ class MainActivity : Activity() {
             VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "LEFT"
             VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "RIGHT"
         }
-        modeBadge.text = "$projectionLabel $eyeLabel · drops N:$normalDroppedFrames F:$fullscreenDroppedFrames · $activeVideoDecoder"
+        modeBadge.text = "$projectionLabel $eyeLabel · $activeVideoSize · N:$normalDroppedFrames F:$fullscreenDroppedFrames · $activeVideoDecoder · AV1 HW:$av1HardwareDecoders"
     }
 
     private fun updateSphericalSurfaceBufferSize() {
