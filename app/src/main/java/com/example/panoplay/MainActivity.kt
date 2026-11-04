@@ -376,7 +376,13 @@ class MainActivity : Activity() {
                 topInset = top
                 bottomInset = bottom
             }
-            view.setPadding(dp(18), dp(8) + topInset, dp(18), dp(10) + bottomInset)
+            if (isFullscreen) {
+                // Do not reapply the normal 18dp horizontal gutters when Android
+                // dispatches fresh insets after immersive mode is entered.
+                view.setPadding(0, 0, 0, 0)
+            } else {
+                view.setPadding(dp(18), dp(8) + topInset, dp(18), dp(10) + bottomInset)
+            }
             insets
         }
         root.requestApplyInsets()
