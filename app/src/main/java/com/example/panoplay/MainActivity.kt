@@ -49,6 +49,8 @@ class MainActivity : Activity() {
     private lateinit var durationView: TextView
     private lateinit var rotateButton: TextView
     private lateinit var fullscreenButton: TextView
+    private lateinit var overlayPlayButton: TextView
+    private lateinit var overlaySeekBar: SeekBar
     private lateinit var rootLayout: LinearLayout
     private val fullscreenChrome = mutableListOf<View>()
     private var isFullscreen = false
@@ -72,6 +74,9 @@ class MainActivity : Activity() {
                     currentTimeView.text = formatTime(position)
                 }
                 durationView.text = formatTime(duration)
+                if (::overlaySeekBar.isInitialized && !isScrubbing) {
+                    overlaySeekBar.progress = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
+                }
             }
             mainHandler.postDelayed(this, 500L)
         }
@@ -89,6 +94,7 @@ class MainActivity : Activity() {
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 playButton.text = if (isPlaying) "Ⅱ" else "▶"
+                if (::overlayPlayButton.isInitialized) overlayPlayButton.text = if (isPlaying) "Ⅱ" else "▶"
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -223,6 +229,52 @@ class MainActivity : Activity() {
             setMargins(0, dp(12), dp(12), 0)
         }
         videoFrame.addView(fullscreenButton, fullscreenParams)
+
+        val videoControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(5), dp(12), dp(5))
+            background = rounded(Color.argb(205, 8, 10, 14), 14)
+            elevation = dp(6).toFloat()
+        }
+        val rewind = transportButton("↶ 10").apply {
+            setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
+        }
+        overlayPlayButton = transportButton("▶", true).apply {
+            setOnClickListener {
+                if (player.isPlaying) player.pause() else {
+                    if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
+                    player.play()
+                }
+            }
+        }
+        val forward = transportButton("10 ↷").apply {
+            setOnClickListener {
+                val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
+                player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
+            }
+        }
+        overlaySeekBar = SeekBar(this).apply {
+            max = 1000
+            progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(255, 79, 94))
+            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onStartTrackingTouch(bar: SeekBar?) { isScrubbing = true }
+                override fun onStopTrackingTouch(bar: SeekBar?) {
+                    val d = player.duration
+                    if (d != C.TIME_UNSET && d > 0L) player.seekTo(progress * d / 1000L)
+                    isScrubbing = false
+                }
+                override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {}
+            })
+        }
+        videoControls.addView(rewind, LinearLayout.LayoutParams(dp(54), dp(38)))
+        videoControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(54), dp(38)).apply { leftMargin = dp(6) })
+        videoControls.addView(forward, LinearLayout.LayoutParams(dp(54), dp(38)).apply { leftMargin = dp(6) })
+        videoControls.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(38), 1f).apply { leftMargin = dp(8) })
+        videoFrame.addView(videoControls, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
+            setMargins(dp(10), 0, dp(10), dp(10))
+        })
 
         placeholder = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
