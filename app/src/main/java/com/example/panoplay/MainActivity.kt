@@ -634,6 +634,10 @@ class MainActivity : Activity() {
     @Suppress("DEPRECATION")
     private fun enterImmersiveMode() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Android 11+ normally keeps the app content inside the stable system-bar
+            // insets even after the bars are hidden. Disable decor fitting so the
+            // video surface can extend behind those insets to the physical display edges.
+            window.setDecorFitsSystemWindows(false)
             window.insetsController?.let { controller ->
                 controller.hide(WindowInsets.Type.systemBars())
                 controller.systemBarsBehavior =
@@ -655,6 +659,7 @@ class MainActivity : Activity() {
     private fun exitImmersiveMode() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.insetsController?.show(WindowInsets.Type.systemBars())
+            window.setDecorFitsSystemWindows(true)
         } else {
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         }
