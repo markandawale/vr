@@ -215,6 +215,19 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
         modeRow.addView(threeSixtyChip, LinearLayout.LayoutParams(0, dp(42), 1f).apply { leftMargin = dp(5) })
         root.addView(modeRow)
 
+        val stereoRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(6))
+        }
+        monoChip = stereoChip("MONO", VrVideoSurfaceView.StereoLayout.MONO)
+        leftEyeChip = stereoChip("SBS LEFT", VrVideoSurfaceView.StereoLayout.SBS_LEFT)
+        rightEyeChip = stereoChip("SBS RIGHT", VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
+        stereoRow.addView(monoChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { rightMargin = dp(4) })
+        stereoRow.addView(leftEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
+        stereoRow.addView(rightEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4) })
+        root.addView(stereoRow)
+
         val seekRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -310,6 +323,29 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
     private lateinit var flatChip: TextView
     private lateinit var oneEightyChip: TextView
     private lateinit var threeSixtyChip: TextView
+    private lateinit var monoChip: TextView
+    private lateinit var leftEyeChip: TextView
+    private lateinit var rightEyeChip: TextView
+    private var stereoLayout = VrVideoSurfaceView.StereoLayout.MONO
+
+    private fun stereoChip(label: String, layout: VrVideoSurfaceView.StereoLayout): TextView =
+        text(label, 10f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            setOnClickListener {
+                stereoLayout = layout
+                vrSurface.setStereoLayout(layout)
+                updateModeChips()
+                if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+                    val projectionLabel = if (currentProjection == VrVideoSurfaceView.Projection.VR180) "180° VIEW" else "360° VIEW"
+                    val eyeLabel = when (layout) {
+                        VrVideoSurfaceView.StereoLayout.MONO -> "MONO"
+                        VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "LEFT EYE"
+                        VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "RIGHT EYE"
+                    }
+                    modeBadge.text = "$projectionLabel · $eyeLabel"
+                }
+            }
+        }
 
     private fun modeChip(label: String, projection: VrVideoSurfaceView.Projection): TextView = text(label, 12f, Color.WHITE, true).apply {
         gravity = Gravity.CENTER
@@ -318,27 +354,35 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
 
     private fun setProjection(projection: VrVideoSurfaceView.Projection) {
         currentProjection = projection
-        vrSurface.setProjection(projection)
-        vrSurface.resetView()
-
         if (projection == VrVideoSurfaceView.Projection.FLAT) {
-            // Detach the GL surface before handing video output back to Media3.
-            attachedSurface?.let { player.clearVideoSurface(it) }
-            vrSurface.visibility = View.GONE
-            playerView.visibility = View.VISIBLE
+            // Release the GL output before returning playback to Media3's PlayerView.
+            attachedSurface?.let { if (it.isValid) player.clearVideoSurface(it) }
             playerView.player = player
+            playerView.visibility = View.VISIBLE
+            vrSurface.visibility = View.GONE
         } else {
-            // Release Media3's flat output before attaching the GL Surface.
+            // Detach PlayerView first. GLSurfaceView creates its output asynchronously;
+            // onVideoSurfaceAvailable() attaches the new Surface when it is ready.
             playerView.player = null
+            player.clearVideoSurface()
             playerView.visibility = View.GONE
+            vrSurface.setProjection(projection)
+            vrSurface.setStereoLayout(stereoLayout)
+            vrSurface.resetView()
             vrSurface.visibility = View.VISIBLE
-            attachedSurface?.let { player.setVideoSurface(it) }
+            vrSurface.requestRender()
+            attachedSurface?.let { if (it.isValid) player.setVideoSurface(it) }
         }
-        modeBadge.text = when (projection) {
+        val projectionLabel = when (projection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
             VrVideoSurfaceView.Projection.VR180 -> "180° VIEW"
             VrVideoSurfaceView.Projection.VR360 -> "360° VIEW"
         }
+        modeBadge.text = if (projection != VrVideoSurfaceView.Projection.FLAT &&
+            stereoLayout != VrVideoSurfaceView.StereoLayout.MONO) {
+            val eyeLabel = if (stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT) "LEFT EYE" else "RIGHT EYE"
+            "$projectionLabel · $eyeLabel"
+        } else projectionLabel
         updateModeChips()
     }
 
@@ -350,6 +394,9 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
         style(flatChip, currentProjection == VrVideoSurfaceView.Projection.FLAT)
         style(oneEightyChip, currentProjection == VrVideoSurfaceView.Projection.VR180)
         style(threeSixtyChip, currentProjection == VrVideoSurfaceView.Projection.VR360)
+        style(monoChip, stereoLayout == VrVideoSurfaceView.StereoLayout.MONO)
+        style(leftEyeChip, stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT)
+        style(rightEyeChip, stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
     }
 
     private fun chooseVideo() {

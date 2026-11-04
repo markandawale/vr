@@ -28,6 +28,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 ) : GLSurfaceView(context, attrs), GLSurfaceView.Renderer {
 
     enum class Projection { FLAT, VR180, VR360 }
+    enum class StereoLayout { MONO, SBS_LEFT, SBS_RIGHT }
 
     interface SurfaceEvents {
         fun onVideoSurfaceAvailable(surface: Surface)
@@ -58,6 +59,11 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
     fun setProjection(projection: Projection) {
         queueEvent { renderer.setProjection(projection) }
+        requestRender()
+    }
+
+    fun setStereoLayout(layout: StereoLayout) {
+        queueEvent { renderer.setStereoLayout(layout) }
         requestRender()
     }
 
@@ -126,7 +132,12 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         private var width = 1
         private var height = 1
         private var videoAspect = 16f / 9f
+        // Keep the decoder's dimensions even if Media3 reports them before the
+        // GLSurfaceView becomes visible and creates its SurfaceTexture.
+        private var videoWidth = 0
+        private var videoHeight = 0
         private var projection = Projection.FLAT
+        private var stereoLayout = StereoLayout.MONO
         private var yaw = 0f
         private var pitch = 0f
         private var fieldOfView = 78f
@@ -167,6 +178,9 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             oldTexture?.release()
             surfaceTexture = SurfaceTexture(oesTextureId).also {
                 it.setOnFrameAvailableListener(this)
+                if (videoWidth > 0 && videoHeight > 0) {
+                    it.setDefaultBufferSize(videoWidth, videoHeight)
+                }
             }
             outputSurface = Surface(surfaceTexture)
             val created = outputSurface!!
@@ -252,7 +266,14 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             rebuildMesh()
         }
 
+        fun setStereoLayout(next: StereoLayout) {
+            stereoLayout = next
+            rebuildMesh()
+        }
+
         fun setVideoSize(width: Int, height: Int, rotationDegrees: Int, pixelRatio: Float) {
+            videoWidth = width
+            videoHeight = height
             val rotated = rotationDegrees == 90 || rotationDegrees == 270
             val displayWidth = if (rotated) height else width
             val displayHeight = if (rotated) width else height
@@ -319,7 +340,13 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 val x = (cosLat * sin(longitude)).toFloat()
                 val y = sin(latitude).toFloat()
                 val z = (-cosLat * cos(longitude)).toFloat()
-                val u = column.toFloat() / columns
+                val sourceU = column.toFloat() / columns
+                // SBS panoramas place the two eye images in horizontal halves.
+                val u = when (stereoLayout) {
+                    StereoLayout.MONO -> sourceU
+                    StereoLayout.SBS_LEFT -> sourceU * 0.5f
+                    StereoLayout.SBS_RIGHT -> 0.5f + sourceU * 0.5f
+                }
                 val v = (1.0 - (latitude + PI / 2.0) / PI).toFloat()
                 return Pair(floatArrayOf(x, y, z), floatArrayOf(u, v))
             }
