@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -57,6 +58,7 @@ class MainActivity : Activity() {
     private lateinit var rootLayout: LinearLayout
     private val fullscreenChrome = mutableListOf<View>()
     private var isFullscreen = false
+    private var fullscreenControlsVisible = true
     private var normalRootPadding = intArrayOf(0, 0, 0, 0)
     private var normalVideoMargins = intArrayOf(0, 0)
 
@@ -230,8 +232,8 @@ class MainActivity : Activity() {
             setOnClickListener { toggleFullscreen() }
             contentDescription = "Enter full screen"
         }
-        val fullscreenParams = FrameLayout.LayoutParams(dp(46), dp(42), Gravity.TOP or Gravity.END).apply {
-            setMargins(0, dp(12), dp(12), 0)
+        val fullscreenParams = FrameLayout.LayoutParams(dp(46), dp(42), Gravity.BOTTOM or Gravity.END).apply {
+            setMargins(0, 0, dp(12), dp(12))
         }
         videoFrame.addView(fullscreenButton, fullscreenParams)
 
@@ -681,8 +683,11 @@ class MainActivity : Activity() {
 
     private fun toggleFullscreen() {
         isFullscreen = !isFullscreen
+        fullscreenControlsVisible = true
         fullscreenChrome.forEach { it.visibility = if (isFullscreen) View.GONE else View.VISIBLE }
         fullscreenControls.visibility = if (isFullscreen) View.VISIBLE else View.GONE
+        fullscreenButton.visibility = View.VISIBLE
+        fullscreenButton.alpha = 1f
         val params = videoFrame.layoutParams as LinearLayout.LayoutParams
         if (isFullscreen) {
             normalVideoMargins[0] = params.topMargin
@@ -714,7 +719,54 @@ class MainActivity : Activity() {
             fullscreenButton.contentDescription = "Enter full screen"
             exitImmersiveMode()
         }
+        val buttonParams = fullscreenButton.layoutParams as FrameLayout.LayoutParams
+        buttonParams.gravity = Gravity.BOTTOM or Gravity.END
+        buttonParams.bottomMargin = if (isFullscreen) dp(92) else dp(12)
+        buttonParams.topMargin = 0
+        fullscreenButton.layoutParams = buttonParams
         videoFrame.layoutParams = params
+        if (isFullscreen) {
+            installFullscreenTapToggle()
+            setFullscreenControlsVisible(true)
+        } else {
+            setFullscreenControlsVisible(true)
+        }
+    }
+
+    private fun setFullscreenControlsVisible(visible: Boolean) {
+        fullscreenControlsVisible = visible
+        val visibility = if (visible) View.VISIBLE else View.INVISIBLE
+        fullscreenControls.visibility = visibility
+        fullscreenButton.visibility = visibility
+        modeBadge.visibility = visibility
+    }
+
+    private fun installFullscreenTapToggle() {
+        var downX = 0f
+        var downY = 0f
+        var downAt = 0L
+        val tapListener = View.OnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    downY = event.y
+                    downAt = android.os.SystemClock.uptimeMillis()
+                }
+                MotionEvent.ACTION_UP -> {
+                    val dx = event.x - downX
+                    val dy = event.y - downY
+                    val elapsed = android.os.SystemClock.uptimeMillis() - downAt
+                    if (elapsed < 350L && dx * dx + dy * dy < dp(18) * dp(18)) {
+                        setFullscreenControlsVisible(!fullscreenControlsVisible)
+                    }
+                }
+            }
+            false
+        }
+        videoFrame.setOnTouchListener(tapListener)
+        playerView.setOnTouchListener(tapListener)
+        sphericalPlayerView.setOnTouchListener(tapListener)
+        sphericalView?.setOnTouchListener(tapListener)
     }
 
     @Suppress("DEPRECATION")
