@@ -23,6 +23,7 @@ equirectangular
 
 //!PARAM eye
 //!TYPE ENUM int
+mono
 left
 right
 
@@ -60,6 +61,7 @@ vec4 hook() {
     }
     float v = (lat + PI * 0.5) / PI;
     // SBS source: select one eye and expand it to fill the display.
-    u = u * 0.5 + ((eye == right) ? 0.5 : 0.0);
+    if (eye != mono)
+        u = u * 0.5 + ((eye == right) ? 0.5 : 0.0);
     return texture(HOOKED_raw, vec2(u, v));
 }
