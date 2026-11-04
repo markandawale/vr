@@ -32,7 +32,6 @@ import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
 import java.util.Locale
 
@@ -69,11 +68,11 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
 }
 
 @OptIn(UnstableApi::class)
-class MainActivity : Activity() {
+class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
-    private lateinit var sphericalPlayerView: PlayerView
-    private var sphericalView: SphericalGLSurfaceView? = null
+    private lateinit var vrSurface: VrVideoSurfaceView
+    private var attachedSurface: android.view.Surface? = null
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var titleView: TextView
@@ -146,29 +145,12 @@ class MainActivity : Activity() {
                 }
             }
 
-            override fun onRenderedFirstFrame() {
-                if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
-                    val projection = currentProjection
-                    val layout = stereoLayout
-                    queueSphericalProjection(projection, layout)
-                    // SurfaceTexture delivery and the spherical GL draw happen on
-                    // different threads. Re-apply after the first metadata frame has
-                    // been consumed so its default mesh cannot replace the chosen one.
-                    mainHandler.postDelayed({
-                        if (currentProjection == projection && stereoLayout == layout) {
-                            queueSphericalProjection(projection, layout)
-                        }
-                    }, 300L)
-                }
-            }
-
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 val rotated = videoSize.unappliedRotationDegrees == 90 || videoSize.unappliedRotationDegrees == 270
                 val displayWidth = if (rotated) videoSize.height else videoSize.width
                 val displayHeight = if (rotated) videoSize.width else videoSize.height
                 sourceAspectRatio = displayWidth * videoSize.pixelWidthHeightRatio / displayHeight.coerceAtLeast(1)
-                // Keep the user's selected/default eye layout. Do not auto-switch
-                // SBS LEFT to MONO based on aspect ratio: 180° SBS files can be 2:1.
+                vrSurface.setVideoSize(videoSize.width, videoSize.height, videoSize.unappliedRotationDegrees, videoSize.pixelWidthHeightRatio)
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -222,18 +204,9 @@ class MainActivity : Activity() {
         playerView.player = player
         videoFrame.addView(playerView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // Use Media3's maintained spherical renderer for 180°/360° playback.
-        // It owns the video SurfaceTexture and handles SBS eye cropping.
-        sphericalPlayerView = LayoutInflater.from(this).inflate(
-            R.layout.spherical_video_player, videoFrame, false
-        ) as PlayerView
-        sphericalView = sphericalPlayerView.videoSurfaceView as? SphericalGLSurfaceView
-        sphericalView?.setUseSensorRotation(false)
-        sphericalPlayerView.visibility = View.GONE
-        videoFrame.addView(
-            sphericalPlayerView,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        )
+        // Experimental spherical path: custom GL renderer; Flat 2D remains on Media3 SurfaceView.
+        vrSurface = VrVideoSurfaceView(this).apply { surfaceEvents = this@MainActivity; visibility = View.GONE }
+        videoFrame.addView(vrSurface, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         val viewBadge = text("FLAT 2D", 10f, Color.WHITE, true).apply {
             setPadding(dp(12), dp(7), dp(12), dp(7))
@@ -546,20 +519,13 @@ class MainActivity : Activity() {
     private fun setProjection(projection: VrVideoSurfaceView.Projection) {
         currentProjection = projection
         if (projection == VrVideoSurfaceView.Projection.FLAT) {
-            // Keep the working Media3 flat playback path.
-            playerView.visibility = View.VISIBLE
-            PlayerView.switchTargetView(player, sphericalPlayerView, playerView)
-            sphericalPlayerView.visibility = View.GONE
+            attachedSurface?.let { if (it.isValid) player.clearVideoSurface(it) }
+            playerView.player = player; playerView.visibility = View.VISIBLE; vrSurface.visibility = View.GONE
         } else {
-            // ExoPlayer's own spherical surface manages GL lifecycle and video output.
-            // Keep its built-in stereo mode MONO: our projection mesh below crops the
-            // exact source eye, which also supports SBS RIGHT without double-cropping.
-            sphericalView?.setDefaultStereoMode(C.STEREO_MODE_MONO)
-            sphericalView?.setUseSensorRotation(false)
-            sphericalPlayerView.visibility = View.VISIBLE
-            PlayerView.switchTargetView(player, playerView, sphericalPlayerView)
-            playerView.visibility = View.GONE
-            queueSphericalProjection(projection, stereoLayout)
+            playerView.player = null; player.clearVideoSurface(); playerView.visibility = View.GONE
+            vrSurface.setProjection(projection); vrSurface.setStereoLayout(stereoLayout); vrSurface.resetView()
+            vrSurface.visibility = View.VISIBLE; vrSurface.requestRender()
+            attachedSurface?.let { if (it.isValid) player.setVideoSurface(it) }
         }
         val projectionLabel = when (projection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
@@ -573,93 +539,14 @@ class MainActivity : Activity() {
         updateModeChips()
     }
 
-    /**
-     * Overrides Media3's default full-sphere mesh on its GL thread. Media3 1.11.1
-     * keeps Projection/ProjectionRenderer package-private, so reflection is used
-     * only for mesh creation; decoder surfaces, frame delivery, touch input and
-     * GL lifecycle remain owned by Media3's SphericalGLSurfaceView.
-     */
-    private fun queueSphericalProjection(
-        projection: VrVideoSurfaceView.Projection,
-        layout: VrVideoSurfaceView.StereoLayout
-    ) {
-        val view = sphericalView ?: return
-        if (projection == VrVideoSurfaceView.Projection.FLAT) return
-        view.queueEvent {
-            try {
-                val projectionName = "androidx.media3.exoplayer.video.spherical.Projection"
-                val projectionClass = Class.forName(projectionName)
-                val meshClassName = "$projectionName\$Mesh"
-                val subMeshClassName = "$projectionName\$SubMesh"
-                val intType = Int::class.javaPrimitiveType!!
-                val floatType = Float::class.javaPrimitiveType!!
-
-                val factory = projectionClass.getDeclaredMethod(
-                    "createEquirectangular",
-                    floatType, intType, intType, floatType, floatType, intType
-                ).apply { isAccessible = true }
-                val horizontalFov = if (projection == VrVideoSurfaceView.Projection.VR180) 180f else 360f
-                val baseProjection = factory.invoke(
-                    null, 50f, 36, 72, 180f, horizontalFov, C.STEREO_MODE_MONO
-                )
-                val sourceMeshField = projectionClass.getField("leftMesh").apply { isAccessible = true }
-                val sourceMesh = sourceMeshField.get(baseProjection)
-                val meshClass = Class.forName(meshClassName)
-                val subMeshClass = Class.forName(subMeshClassName)
-                val getSubMesh = meshClass.getMethod("getSubMesh", intType).apply { isAccessible = true }
-                val sourceSubMesh = getSubMesh.invoke(sourceMesh, 0)
-
-                val textureCoordsField = subMeshClass.getField("textureCoords").apply { isAccessible = true }
-                val textureCoords = (textureCoordsField.get(sourceSubMesh) as FloatArray).clone()
-                val cropStart = when (layout) {
-                    VrVideoSurfaceView.StereoLayout.MONO,
-                    VrVideoSurfaceView.StereoLayout.SBS_LEFT -> 0f
-                    VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> 0.5f
-                }
-                val cropWidth = if (layout == VrVideoSurfaceView.StereoLayout.MONO) 1f else 0.5f
-                for (i in textureCoords.indices step 2) {
-                    textureCoords[i] = cropStart + textureCoords[i] * cropWidth
-                }
-
-                val textureIdField = subMeshClass.getField("textureId").apply { isAccessible = true }
-                val verticesField = subMeshClass.getField("vertices").apply { isAccessible = true }
-                val modeField = subMeshClass.getField("mode").apply { isAccessible = true }
-                val subMeshConstructor = subMeshClass.getConstructor(
-                    intType, FloatArray::class.java, FloatArray::class.java, intType
-                ).apply { isAccessible = true }
-                val selectedSubMesh = subMeshConstructor.newInstance(
-                    textureIdField.getInt(sourceSubMesh),
-                    verticesField.get(sourceSubMesh) as FloatArray,
-                    textureCoords,
-                    modeField.getInt(sourceSubMesh)
-                )
-                val subMeshArray = java.lang.reflect.Array.newInstance(subMeshClass, 1)
-                java.lang.reflect.Array.set(subMeshArray, 0, selectedSubMesh)
-                val meshConstructor = meshClass.getConstructor(subMeshArray.javaClass).apply { isAccessible = true }
-                val selectedMesh = meshConstructor.newInstance(subMeshArray)
-                val projectionConstructor = projectionClass.getConstructor(meshClass, intType).apply { isAccessible = true }
-                val selectedProjection = projectionConstructor.newInstance(selectedMesh, C.STEREO_MODE_MONO)
-
-                val sceneField = view.javaClass.getDeclaredField("scene").apply { isAccessible = true }
-                val scene = sceneField.get(view)
-                val rendererField = scene.javaClass.getDeclaredField("projectionRenderer").apply { isAccessible = true }
-                val projectionRenderer = rendererField.get(scene)
-                val setProjection = projectionRenderer.javaClass
-                    .getDeclaredMethod("setProjection", projectionClass).apply { isAccessible = true }
-                setProjection.invoke(projectionRenderer, selectedProjection)
-            } catch (error: Exception) {
-                android.util.Log.e("PanoPlay", "Could not apply spherical projection", error)
-                mainHandler.post {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Panorama setup failed: ${error.javaClass.simpleName}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            }
-        }
+    override fun onVideoSurfaceAvailable(surface: android.view.Surface) {
+        if (attachedSurface !== surface) { attachedSurface?.let { player.clearVideoSurface(it); it.release() }; attachedSurface = surface }
+        if (currentProjection != VrVideoSurfaceView.Projection.FLAT && surface.isValid) player.setVideoSurface(surface)
     }
-
+    override fun onVideoSurfaceDestroyed(surface: android.view.Surface) {
+        if (attachedSurface === surface) { player.clearVideoSurface(surface); attachedSurface = null }
+        surface.release()
+    }
     private fun updateModeChips() {
         fun style(view: TextView, active: Boolean) {
             view.background = rounded(if (active) Color.rgb(255, 79, 94) else Color.rgb(28, 31, 38), 12)
@@ -833,11 +720,11 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onResume()
+        if (::vrSurface.isInitialized) vrSurface.onResume()
     }
 
     override fun onPause() {
-        if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onPause()
+        if (::vrSurface.isInitialized) vrSurface.onPause()
         if (::player.isInitialized) player.pause()
         super.onPause()
     }
@@ -845,7 +732,8 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         mainHandler.removeCallbacks(progressUpdater)
         if (::playerView.isInitialized) playerView.player = null
-        if (::sphericalPlayerView.isInitialized) sphericalPlayerView.player = null
+        if (attachedSurface != null) { player.clearVideoSurface(attachedSurface!!); attachedSurface?.release(); attachedSurface = null }
+        if (::vrSurface.isInitialized) vrSurface.surfaceEvents = null
         if (::player.isInitialized) player.release()
         super.onDestroy()
     }
