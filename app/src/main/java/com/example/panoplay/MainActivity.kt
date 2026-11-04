@@ -28,14 +28,18 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
 import java.util.Locale
 
-class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
+@OptIn(UnstableApi::class)
+class MainActivity : Activity() {
     private lateinit var player: ExoPlayer
-    private lateinit var vrSurface: VrVideoSurfaceView
     private lateinit var playerView: PlayerView
+    private lateinit var sphericalPlayerView: PlayerView
+    private var sphericalView: SphericalGLSurfaceView? = null
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var titleView: TextView
@@ -45,8 +49,8 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
     private lateinit var durationView: TextView
     private lateinit var rotateButton: TextView
 
-    private var attachedSurface: android.view.Surface? = null
     private var isScrubbing = false
+    private var sourceAspectRatio = 16f / 9f
     private var currentProjection = VrVideoSurfaceView.Projection.FLAT
     private var isLandscape = false
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -92,30 +96,21 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
             }
 
             override fun onVideoSizeChanged(videoSize: VideoSize) {
-                vrSurface.setVideoSize(
-                    videoSize.width,
-                    videoSize.height,
-                    videoSize.unappliedRotationDegrees,
-                    videoSize.pixelWidthHeightRatio
-                )
-                // SBS 180/360 files are commonly twice as wide as a normal
-                // 16:9 frame. Select the left eye automatically as a useful
-                // starting view; users can switch to mono or the right eye.
-                val sourceAspect = videoSize.width.toFloat() / videoSize.height.coerceAtLeast(1)
-                // 180° SBS commonly has a 2:1 full-frame aspect ratio
-                // (two square eye images), while 360° SBS is often wider.
-                // This is only a starting guess; the MONO button remains
-                // available for ordinary 2:1 equirectangular videos.
-                val detectedStereo = if (sourceAspect >= 1.95f) {
+                val rotated = videoSize.unappliedRotationDegrees == 90 || videoSize.unappliedRotationDegrees == 270
+                val displayWidth = if (rotated) videoSize.height else videoSize.width
+                val displayHeight = if (rotated) videoSize.width else videoSize.height
+                sourceAspectRatio = displayWidth * videoSize.pixelWidthHeightRatio / displayHeight.coerceAtLeast(1)
+                // 360° SBS equirectangular files are normally around 4:1 overall.
+                // 2:1 is usually mono 360°, so let users choose SBS manually for 180° sources.
+                val detectedStereo = if (sourceAspectRatio >= 3.5f) {
                     VrVideoSurfaceView.StereoLayout.SBS_LEFT
                 } else {
                     VrVideoSurfaceView.StereoLayout.MONO
                 }
                 if (stereoLayout != detectedStereo) {
                     stereoLayout = detectedStereo
-                    vrSurface.setStereoLayout(stereoLayout)
                     updateModeChips()
-                    setProjection(currentProjection)
+                    if (currentProjection != VrVideoSurfaceView.Projection.FLAT) setProjection(currentProjection)
                 }
             }
 
@@ -167,12 +162,18 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
         playerView.player = player
         videoFrame.addView(playerView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // The OpenGL surface is used only for 180/360 projection modes.
-        vrSurface = VrVideoSurfaceView(this).apply {
-            surfaceEvents = this@MainActivity
-            visibility = View.GONE
-        }
-        videoFrame.addView(vrSurface, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        // Use Media3's maintained spherical renderer for 180°/360° playback.
+        // It owns the video SurfaceTexture and handles SBS eye cropping.
+        sphericalPlayerView = LayoutInflater.from(this).inflate(
+            R.layout.spherical_video_player, videoFrame, false
+        ) as PlayerView
+        sphericalView = sphericalPlayerView.videoSurfaceView as? SphericalGLSurfaceView
+        sphericalView?.setUseSensorRotation(false)
+        sphericalPlayerView.visibility = View.GONE
+        videoFrame.addView(
+            sphericalPlayerView,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
 
         val viewBadge = text("FLAT 2D", 10f, Color.WHITE, true).apply {
             setPadding(dp(12), dp(7), dp(12), dp(7))
@@ -352,10 +353,7 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
             gravity = Gravity.CENTER
             setOnClickListener {
                 stereoLayout = layout
-                vrSurface.setStereoLayout(layout)
                 updateModeChips()
-                // In Flat 2D, SBS eye selection must switch to the GL quad
-                // renderer too; changing a hidden renderer had no visible effect.
                 setProjection(currentProjection)
                 if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
                     val projectionLabel = if (currentProjection == VrVideoSurfaceView.Projection.VR180) "180° VIEW" else "360° VIEW"
@@ -376,25 +374,23 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
 
     private fun setProjection(projection: VrVideoSurfaceView.Projection) {
         currentProjection = projection
-        val useGlOutput = shouldUseGlOutput()
-        if (!useGlOutput) {
-            // Ordinary mono flat video stays on Media3's standard SurfaceView.
-            attachedSurface?.let { if (it.isValid) player.clearVideoSurface(it) }
-            playerView.player = player
+        if (projection == VrVideoSurfaceView.Projection.FLAT) {
+            // Keep the working Media3 flat playback path.
             playerView.visibility = View.VISIBLE
-            vrSurface.visibility = View.GONE
+            PlayerView.switchTargetView(player, sphericalPlayerView, playerView)
+            sphericalPlayerView.visibility = View.GONE
         } else {
-            // Panoramic and SBS views use the renderer so eye cropping is applied
-            // to the actual visible output, including the Flat 2D SBS preview.
-            playerView.player = null
-            player.clearVideoSurface()
+            // ExoPlayer's own spherical surface manages GL lifecycle and video output.
+            val defaultStereo = when (stereoLayout) {
+                VrVideoSurfaceView.StereoLayout.MONO -> C.STEREO_MODE_MONO
+                VrVideoSurfaceView.StereoLayout.SBS_LEFT,
+                VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> C.STEREO_MODE_LEFT_RIGHT
+            }
+            sphericalView?.setDefaultStereoMode(defaultStereo)
+            sphericalView?.setUseSensorRotation(false)
+            sphericalPlayerView.visibility = View.VISIBLE
+            PlayerView.switchTargetView(player, playerView, sphericalPlayerView)
             playerView.visibility = View.GONE
-            vrSurface.setProjection(projection)
-            vrSurface.setStereoLayout(stereoLayout)
-            vrSurface.resetView()
-            vrSurface.visibility = View.VISIBLE
-            vrSurface.requestRender()
-            attachedSurface?.let { if (it.isValid) player.setVideoSurface(it) }
         }
         val projectionLabel = when (projection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
@@ -470,40 +466,13 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
         rotateButton.text = if (isLandscape) "PORTRAIT" else "ROTATE"
     }
 
-    private fun shouldUseGlOutput(): Boolean =
-        currentProjection != VrVideoSurfaceView.Projection.FLAT ||
-            stereoLayout != VrVideoSurfaceView.StereoLayout.MONO
-
-    override fun onVideoSurfaceAvailable(surface: android.view.Surface) {
-        if (attachedSurface !== surface) {
-            attachedSurface?.let {
-                player.clearVideoSurface(it)
-                it.release()
-            }
-            attachedSurface = surface
-        }
-        // Flat SBS is rendered by GLSurfaceView too. Do not gate attachment
-        // on projection alone or the GL view remains black in Flat SBS mode.
-        if (shouldUseGlOutput() && surface.isValid) {
-            player.setVideoSurface(surface)
-        }
-    }
-
-    override fun onVideoSurfaceDestroyed(surface: android.view.Surface) {
-        if (attachedSurface === surface) {
-            player.clearVideoSurface(surface)
-            attachedSurface = null
-        }
-        surface.release()
-    }
-
     override fun onResume() {
         super.onResume()
-        if (::vrSurface.isInitialized) vrSurface.onResume()
+        if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onResume()
     }
 
     override fun onPause() {
-        if (::vrSurface.isInitialized) vrSurface.onPause()
+        if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onPause()
         if (::player.isInitialized) player.pause()
         super.onPause()
     }
@@ -511,13 +480,8 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
     override fun onDestroy() {
         mainHandler.removeCallbacks(progressUpdater)
         if (::playerView.isInitialized) playerView.player = null
-        if (attachedSurface != null) {
-            player.clearVideoSurface(attachedSurface!!)
-            attachedSurface?.release()
-            attachedSurface = null
-        }
+        if (::sphericalPlayerView.isInitialized) sphericalPlayerView.player = null
         if (::player.isInitialized) player.release()
-        if (::vrSurface.isInitialized) vrSurface.surfaceEvents = null
         super.onDestroy()
     }
 
