@@ -118,8 +118,8 @@ class MainActivity : Activity() {
     private val progressUpdater = object : Runnable {
         override fun run() {
             if (::player.isInitialized) {
-                val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
-                val position = player.currentPosition.coerceAtLeast(0L)
+                val duration = activeDuration()
+                val position = activePosition()
                 if (!isScrubbing) {
                     seekBar.max = 1000
                     seekBar.progress = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
@@ -347,20 +347,20 @@ class MainActivity : Activity() {
             elevation = 0f
         }
         val rewind = transportButton("↶ 10").apply {
-            setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
+            setOnClickListener { seekActive((activePosition() - 10_000L).coerceAtLeast(0L)) }
         }
         overlayPlayButton = transportButton("▶", true).apply {
             setOnClickListener {
-                if (player.isPlaying) player.pause() else {
-                    if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
-                    player.play()
+                if (activeIsPlaying()) pauseActive() else {
+                    if (activePosition() >= activeDuration() && activeDuration() > 0L) seekActive(0L)
+                    playActive()
                 }
             }
         }
         val forward = transportButton("10 ↷").apply {
             setOnClickListener {
-                val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-                player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
+                val end = activeDuration().takeIf { it > 0L } ?: Long.MAX_VALUE
+                seekActive((activePosition() + 10_000L).coerceAtMost(end))
             }
         }
         overlaySeekBar = SeekBar(this).apply {
@@ -370,8 +370,8 @@ class MainActivity : Activity() {
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onStartTrackingTouch(bar: SeekBar?) { isScrubbing = true }
                 override fun onStopTrackingTouch(bar: SeekBar?) {
-                    val d = player.duration
-                    if (d != C.TIME_UNSET && d > 0L) player.seekTo(progress * d / 1000L)
+                    val d = activeDuration()
+                    if (d > 0L) seekActive(progress * d / 1000L)
                     isScrubbing = false
                 }
                 override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {}
@@ -494,15 +494,15 @@ class MainActivity : Activity() {
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onStartTrackingTouch(seekBar: SeekBar?) { isScrubbing = true }
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    val duration = player.duration
-                    if (duration != C.TIME_UNSET && duration > 0L) {
-                        player.seekTo((this@MainActivity.seekBar.progress / 1000f * duration).toLong())
+                    val duration = activeDuration()
+                    if (duration > 0L) {
+                        seekActive((this@MainActivity.seekBar.progress / 1000f * duration).toLong())
                     }
                     isScrubbing = false
                 }
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (fromUser) {
-                        val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+                        val duration = activeDuration()
                         currentTimeView.text = formatTime((duration * progress) / 1000L)
                     }
                 }
@@ -535,8 +535,8 @@ class MainActivity : Activity() {
         }
         val forwardButton = transportButton("10 ↷").apply {
             setOnClickListener {
-                val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-                player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
+                val end = activeDuration().takeIf { it > 0L } ?: Long.MAX_VALUE
+                seekActive((activePosition() + 10_000L).coerceAtMost(end))
             }
         }
         // Give both skip controls identical widths and symmetric spacing so their
