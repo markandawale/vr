@@ -98,6 +98,21 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
                     videoSize.unappliedRotationDegrees,
                     videoSize.pixelWidthHeightRatio
                 )
+                // SBS 180/360 files are commonly twice as wide as a normal
+                // 16:9 frame. Select the left eye automatically as a useful
+                // starting view; users can switch to mono or the right eye.
+                val sourceAspect = videoSize.width.toFloat() / videoSize.height.coerceAtLeast(1)
+                val detectedStereo = if (sourceAspect >= 2.4f) {
+                    VrVideoSurfaceView.StereoLayout.SBS_LEFT
+                } else {
+                    VrVideoSurfaceView.StereoLayout.MONO
+                }
+                if (stereoLayout != detectedStereo) {
+                    stereoLayout = detectedStereo
+                    vrSurface.setStereoLayout(stereoLayout)
+                    updateModeChips()
+                    setProjection(currentProjection)
+                }
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -335,6 +350,9 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
                 stereoLayout = layout
                 vrSurface.setStereoLayout(layout)
                 updateModeChips()
+                // In Flat 2D, SBS eye selection must switch to the GL quad
+                // renderer too; changing a hidden renderer had no visible effect.
+                setProjection(currentProjection)
                 if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
                     val projectionLabel = if (currentProjection == VrVideoSurfaceView.Projection.VR180) "180° VIEW" else "360° VIEW"
                     val eyeLabel = when (layout) {
@@ -354,15 +372,17 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
 
     private fun setProjection(projection: VrVideoSurfaceView.Projection) {
         currentProjection = projection
-        if (projection == VrVideoSurfaceView.Projection.FLAT) {
-            // Release the GL output before returning playback to Media3's PlayerView.
+        val useGlOutput = projection != VrVideoSurfaceView.Projection.FLAT ||
+            stereoLayout != VrVideoSurfaceView.StereoLayout.MONO
+        if (!useGlOutput) {
+            // Ordinary mono flat video stays on Media3's standard SurfaceView.
             attachedSurface?.let { if (it.isValid) player.clearVideoSurface(it) }
             playerView.player = player
             playerView.visibility = View.VISIBLE
             vrSurface.visibility = View.GONE
         } else {
-            // Detach PlayerView first. GLSurfaceView creates its output asynchronously;
-            // onVideoSurfaceAvailable() attaches the new Surface when it is ready.
+            // Panoramic and SBS views use the renderer so eye cropping is applied
+            // to the actual visible output, including the Flat 2D SBS preview.
             playerView.player = null
             player.clearVideoSurface()
             playerView.visibility = View.GONE
