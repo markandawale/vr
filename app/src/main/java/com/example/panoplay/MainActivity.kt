@@ -789,6 +789,7 @@ class MainActivity : Activity() {
         } else {
             val paused = mpv?.getPropertyBoolean("pause") ?: true
             mpv?.setPropertyBoolean("pause", !paused)
+            updatePlayButtons(paused)
         }
     }
 
@@ -824,6 +825,7 @@ class MainActivity : Activity() {
                 engine.command(arrayOf("loadfile", path, "replace"))
                 pendingMpvPath = null
             }
+            updatePlayButtons(true)
             placeholder.visibility = View.GONE
         } catch (error: Exception) {
             android.util.Log.e("PanoPlay", "Unable to open VR video", error)
