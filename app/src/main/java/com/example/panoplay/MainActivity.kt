@@ -288,6 +288,27 @@ class MainActivity : Activity() {
             sphericalPlayerView,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
+        // LibVLC decodes into this SurfaceTexture; our own GL viewer maps it to the 180° sphere.
+        vrSurfaceView = VrVideoSurfaceView(this).apply {
+            visibility = View.GONE
+            surfaceEvents = object : VrVideoSurfaceView.SurfaceEvents {
+                override fun onVideoSurfaceAvailable(surfaceTexture: SurfaceTexture) {
+                    vlcSurfaceTexture = surfaceTexture
+                    attachVlcSurfaceIfReady()
+                }
+                override fun onVideoSurfaceDestroyed(surfaceTexture: SurfaceTexture) {
+                    if (vlcSurfaceTexture === surfaceTexture) {
+                        vlcSurfaceAttached = false
+                        try { vlcPlayer?.vlcVout?.detachViews() } catch (_: Exception) {}
+                        vlcSurfaceTexture = null
+                    }
+                }
+            }
+        }
+        videoFrame.addView(
+            vrSurfaceView,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
         // Re-evaluate the GL output buffer after the spherical view is measured,
         // including the larger bounds used by immersive fullscreen playback.
         sphericalPlayerView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
@@ -605,21 +626,27 @@ class MainActivity : Activity() {
     private fun setProjection(projection: VrVideoSurfaceView.Projection) {
         currentProjection = projection
         if (projection == VrVideoSurfaceView.Projection.FLAT) {
-            // Keep the working Media3 flat playback path.
+            useVlcForVr = false
+            vrSurfaceView?.visibility = View.GONE
+            sphericalPlayerView.visibility = View.GONE
             playerView.visibility = View.VISIBLE
             PlayerView.switchTargetView(player, sphericalPlayerView, playerView)
-            sphericalPlayerView.visibility = View.GONE
+            if (currentVideoUri != null && player.currentMediaItem == null) {
+                player.setMediaItem(MediaItem.fromUri(currentVideoUri!!))
+                player.prepare()
+                player.playWhenReady = true
+            }
         } else {
-            // ExoPlayer's own spherical surface manages GL lifecycle and video output.
-            // Keep its built-in stereo mode MONO: our projection mesh below crops the
-            // exact source eye, which also supports SBS RIGHT without double-cropping.
-            sphericalView?.setDefaultStereoMode(C.STEREO_MODE_MONO)
-            sphericalView?.setUseSensorRotation(false)
-            sphericalPlayerView.visibility = View.VISIBLE
-            PlayerView.switchTargetView(player, playerView, sphericalPlayerView)
+            useVlcForVr = true
+            player.pause()
             playerView.visibility = View.GONE
-            queueSphericalProjection(projection, stereoLayout)
-            sphericalPlayerView.post { updateSphericalSurfaceBufferSize() }
+            sphericalPlayerView.visibility = View.GONE
+            vrSurfaceView?.apply {
+                visibility = View.VISIBLE
+                setProjection(projection)
+                setStereoLayout(stereoLayout)
+            }
+            currentVideoUri?.let { startVlcPlayback(it) }
         }
         val projectionLabel = when (projection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
@@ -784,6 +811,89 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun ensureVlcPlayer() {
+        if (vlcPlayer != null) return
+        val engine = LibVLC(this, arrayListOf("--avcodec-hw=any", "--no-drop-late-frames", "--no-skip-frames"))
+        vlc = engine
+        vlcPlayer = VlcMediaPlayer(engine).apply {
+            setEventListener { event ->
+                when (event.type) {
+                    VlcMediaPlayer.Event.Playing -> {
+                        mainHandler.post {
+                            placeholder.visibility = View.GONE
+                            playButton.text = "Ⅱ"
+                            if (::overlayPlayButton.isInitialized) overlayPlayButton.text = "Ⅱ"
+                            updatePlaybackDiagnostics()
+                        }
+                    }
+                    VlcMediaPlayer.Event.Paused, VlcMediaPlayer.Event.Stopped, VlcMediaPlayer.Event.EndReached -> {
+                        mainHandler.post {
+                            playButton.text = "▶"
+                            if (::overlayPlayButton.isInitialized) overlayPlayButton.text = "▶"
+                        }
+                    }
+                    VlcMediaPlayer.Event.EncounteredError -> mainHandler.post {
+                        Toast.makeText(this@MainActivity, "VLC could not play this video", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun attachVlcSurfaceIfReady() {
+        val texture = vlcSurfaceTexture ?: return
+        val mediaPlayer = vlcPlayer ?: return
+        if (vlcSurfaceAttached) return
+        try {
+            mediaPlayer.vlcVout.setVideoSurface(texture)
+            mediaPlayer.vlcVout.attachViews()
+            vlcSurfaceAttached = true
+            val uri = pendingVlcUri
+            if (uri != null) {
+                pendingVlcUri = null
+                loadVlcMedia(uri)
+            }
+        } catch (error: Exception) {
+            android.util.Log.e("PanoPlay", "Could not attach LibVLC output surface", error)
+            Toast.makeText(this, "VLC video surface error: ${error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun startVlcPlayback(uri: Uri) {
+        ensureVlcPlayer()
+        pendingVlcUri = uri
+        attachVlcSurfaceIfReady()
+    }
+
+    private fun loadVlcMedia(uri: Uri) {
+        val engine = vlc ?: return
+        val mediaPlayer = vlcPlayer ?: return
+        try {
+            mediaPlayer.stop()
+            val media = VlcMedia(engine, uri)
+            mediaPlayer.media = media
+            media.release()
+            mediaPlayer.play()
+            placeholder.visibility = View.VISIBLE
+        } catch (error: Exception) {
+            android.util.Log.e("PanoPlay", "LibVLC playback failed", error)
+            Toast.makeText(this, "VLC playback error: ${error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun activeIsPlaying(): Boolean = if (useVlcForVr) vlcPlayer?.isPlaying == true else player.isPlaying
+    private fun activePosition(): Long = if (useVlcForVr) (vlcPlayer?.time ?: 0L).coerceAtLeast(0L) else player.currentPosition.coerceAtLeast(0L)
+    private fun activeDuration(): Long = if (useVlcForVr) (vlcPlayer?.length ?: 0L).coerceAtLeast(0L) else player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+    private fun seekActive(positionMs: Long) {
+        if (useVlcForVr) vlcPlayer?.time = positionMs else player.seekTo(positionMs)
+    }
+    private fun playActive() {
+        if (useVlcForVr) vlcPlayer?.play() else player.play()
+    }
+    private fun pauseActive() {
+        if (useVlcForVr) vlcPlayer?.pause() else player.pause()
+    }
+
     private fun updateModeChips() {
         fun style(view: TextView, active: Boolean) {
             view.background = rounded(if (active) Color.rgb(255, 79, 94) else Color.rgb(28, 31, 38), 12)
@@ -817,6 +927,7 @@ class MainActivity : Activity() {
         } catch (_: SecurityException) {
             // Some document providers do not offer persistable permissions.
         }
+        currentVideoUri = uri
         currentVideoName = queryDisplayName(uri).ifBlank { "Selected video" }
         // Every newly opened video starts in the requested default viewing mode.
         stereoLayout = VrVideoSurfaceView.StereoLayout.SBS_LEFT
@@ -824,9 +935,7 @@ class MainActivity : Activity() {
         setProjection(VrVideoSurfaceView.Projection.VR180)
         titleView.text = currentVideoName
         placeholder.visibility = View.VISIBLE
-        player.setMediaItem(MediaItem.fromUri(uri))
-        player.prepare()
-        player.playWhenReady = true
+        // The default 180° mode is handled by LibVLC; Flat 2D remains on Media3.
     }
 
     private fun queryDisplayName(uri: Uri): String {
@@ -958,11 +1067,14 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onResume()
+        vrSurfaceView?.onResume()
+        attachVlcSurfaceIfReady()
     }
 
     override fun onPause() {
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onPause()
-        if (::player.isInitialized) player.pause()
+        vrSurfaceView?.onPause()
+        if (useVlcForVr) vlcPlayer?.pause() else if (::player.isInitialized) player.pause()
         super.onPause()
     }
 
@@ -971,6 +1083,9 @@ class MainActivity : Activity() {
         if (::playerView.isInitialized) playerView.player = null
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.player = null
         if (::player.isInitialized) player.release()
+        try { vlcPlayer?.vlcVout?.detachViews() } catch (_: Exception) {}
+        vlcPlayer?.release()
+        vlc?.release()
         super.onDestroy()
     }
 
