@@ -524,7 +524,6 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setOnClickListener {
                 stereoLayout = layout
-                stereoLayoutManuallySelected = true
                 updateModeChips()
                 setProjection(currentProjection)
                 if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
