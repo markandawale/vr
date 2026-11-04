@@ -312,11 +312,19 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        fullscreenCurrentTime = text("00:00", 10f, Color.WHITE, true)
-        fullscreenDuration = text("00:00", 10f, Color.WHITE, true)
-        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT))
+        fullscreenCurrentTime = text("00:00", 10f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            includeFontPadding = false
+        }
+        fullscreenDuration = text("00:00", 10f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+        }
+        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(dp(42), dp(30)))
         fullscreenSeekRow.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(30), 1f))
-        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END })
+        // Keep the duration label vertically centred with the seek-bar track;
+        // Gravity.END here also implies TOP and was pushing it above the row.
+        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(dp(42), dp(30)))
         fullscreenControls.orientation = LinearLayout.VERTICAL
         fullscreenControls.gravity = Gravity.CENTER_HORIZONTAL
         fullscreenControls.addView(fullscreenSeekRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32)))
