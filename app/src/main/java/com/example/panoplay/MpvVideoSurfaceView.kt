@@ -3,6 +3,8 @@ package com.example.panoplay
 import android.content.Context
 import android.util.AttributeSet
 import android.util.Log
+import android.os.Handler
+import android.os.Looper
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import dev.jdtech.mpv.MPVLib
@@ -19,6 +21,9 @@ class MpvVideoSurfaceView @JvmOverloads constructor(
     private var mpv: MPVLib? = null
     private var surfaceAttached = false
     private var pendingFile: String? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    var onFileLoaded: (() -> Unit)? = null
+    private var eventObserver: MPVLib.EventObserver? = null
 
     init {
         holder.addCallback(this)
@@ -38,6 +43,20 @@ class MpvVideoSurfaceView @JvmOverloads constructor(
             instance.setOptionString("audio-display", "no")
             instance.setOptionString("keep-open", "yes")
             instance.setOptionString("osd-level", "0")
+            eventObserver = object : MPVLib.EventObserver {
+                override fun eventProperty(property: String) {}
+                override fun eventProperty(property: String, value: Long) {}
+                override fun eventProperty(property: String, value: Double) {}
+                override fun eventProperty(property: String, value: Boolean) {}
+                override fun eventProperty(property: String, value: String) {}
+                override fun endFile(reason: Int, error: Int) {}
+                override fun event(eventId: Int) {
+                    if (eventId == MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED) {
+                        mainHandler.post { onFileLoaded?.invoke() }
+                    }
+                }
+            }
+            instance.addObserver(eventObserver!!)
             instance.init()
             mpv = instance
             if (holder.surface.isValid) attachSurface(holder)
@@ -130,6 +149,8 @@ class MpvVideoSurfaceView @JvmOverloads constructor(
             if (surfaceAttached) instance.detachSurface()
         } catch (_: Exception) {}
         surfaceAttached = false
+        eventObserver?.let { instance.removeObserver(it) }
+        eventObserver = null
         mpv = null
         instance.destroy()
     }
