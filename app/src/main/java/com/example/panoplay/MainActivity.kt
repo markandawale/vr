@@ -498,20 +498,16 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setPadding(0, dp(4), 0, dp(5))
         }
-        val backButton = transportButton("↶ 10").apply { setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) } }
+        val backButton = transportButton("↶ 10").apply { setOnClickListener { seekRelative(-10_000L) } }
         playButton = transportButton("▶", true).apply {
             textSize = 20f
             setOnClickListener {
-                if (player.isPlaying) player.pause() else {
-                    if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
-                    player.play()
-                }
+                toggleActivePlayback()
             }
         }
         val forwardButton = transportButton("10 ↷").apply {
             setOnClickListener {
-                val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-                player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
+                seekRelative(10_000L)
             }
         }
         // Give both skip controls identical widths and symmetric spacing so their
