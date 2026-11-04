@@ -32,6 +32,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
 import java.util.Locale
@@ -94,6 +95,9 @@ class MainActivity : Activity() {
     private var sphericalBufferWidth = -1
     private var sphericalBufferHeight = -1
     private var sphericalBufferIsFixed = false
+    private var normalDroppedFrames = 0
+    private var fullscreenDroppedFrames = 0
+    private var activeVideoDecoder = "unknown"
     private var fullscreenControlsVisible = true
     private var normalRootPadding = intArrayOf(0, 0, 0, 0)
     private var normalVideoMargins = intArrayOf(0, 0)
@@ -133,6 +137,22 @@ class MainActivity : Activity() {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
         player = ExoPlayer.Builder(this).build()
+        player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
+                if (isFullscreen) fullscreenDroppedFrames += droppedFrames else normalDroppedFrames += droppedFrames
+                mainHandler.post { updatePlaybackDiagnostics() }
+            }
+
+            override fun onVideoDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long
+            ) {
+                activeVideoDecoder = decoderName
+                mainHandler.post { updatePlaybackDiagnostics() }
+            }
+        })
         buildInterface()
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -580,6 +600,7 @@ class MainActivity : Activity() {
             stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT) {
             "$projectionLabel · LEFT EYE"
         } else projectionLabel
+        updatePlaybackDiagnostics()
         updateModeChips()
     }
 
@@ -589,6 +610,21 @@ class MainActivity : Activity() {
      * to the view bounds, reducing the number of pixels the GL renderer must shade.
      * The decoder's input SurfaceTexture remains at the source video resolution.
      */
+    private fun updatePlaybackDiagnostics() {
+        if (!::modeBadge.isInitialized) return
+        val projectionLabel = when (currentProjection) {
+            VrVideoSurfaceView.Projection.FLAT -> "2D"
+            VrVideoSurfaceView.Projection.VR180 -> "180"
+            VrVideoSurfaceView.Projection.VR360 -> "360"
+        }
+        val eyeLabel = when (stereoLayout) {
+            VrVideoSurfaceView.StereoLayout.MONO -> "MONO"
+            VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "LEFT"
+            VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "RIGHT"
+        }
+        modeBadge.text = "$projectionLabel $eyeLabel · drops N:$normalDroppedFrames F:$fullscreenDroppedFrames · $activeVideoDecoder"
+    }
+
     private fun updateSphericalSurfaceBufferSize() {
         val view = sphericalView ?: return
         if (currentProjection == VrVideoSurfaceView.Projection.FLAT) return
