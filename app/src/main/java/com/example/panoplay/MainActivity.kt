@@ -761,6 +761,11 @@ class MainActivity : Activity() {
 
 
 
+    private fun updatePlayButtons(playing: Boolean) {
+        if (::playButton.isInitialized) playButton.text = if (playing) "Ⅱ" else "▶"
+        if (::overlayPlayButton.isInitialized) overlayPlayButton.text = if (playing) "Ⅱ" else "▶"
+    }
+
     private fun activePositionMs(): Long =
         if (currentProjection == VrVideoSurfaceView.Projection.FLAT) player.currentPosition.coerceAtLeast(0L)
         else ((mpv?.getPropertyDouble("time-pos") ?: 0.0) * 1000.0).toLong().coerceAtLeast(0L)
