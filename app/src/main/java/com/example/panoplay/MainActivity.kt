@@ -20,6 +20,9 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.Surface
+import android.os.ParcelFileDescriptor
+import dev.jdtech.mpv.MPVLib
 import android.view.WindowInsets
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -77,6 +80,11 @@ class MainActivity : Activity() {
     private lateinit var playerView: PlayerView
     private lateinit var sphericalPlayerView: PlayerView
     private var sphericalView: SphericalGLSurfaceView? = null
+    private lateinit var vrView: VrVideoSurfaceView
+    private var mpv: MPVLib? = null
+    private var mpvDescriptor: ParcelFileDescriptor? = null
+    private var currentUri: Uri? = null
+    private var pendingMpvPath: String? = null
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var titleView: TextView
@@ -154,6 +162,7 @@ class MainActivity : Activity() {
         player = ExoPlayer.Builder(this, renderersFactory)
             .setLoadControl(loadControl)
             .build()
+        initializeMpv()
         buildInterface()
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -259,6 +268,32 @@ class MainActivity : Activity() {
             sphericalPlayerView,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
+        vrView = VrVideoSurfaceView(this).apply {
+            visibility = View.GONE
+            setProjection(VrVideoSurfaceView.Projection.VR180)
+            setStereoLayout(VrVideoSurfaceView.StereoLayout.SBS_LEFT)
+            surfaceEvents = object : VrVideoSurfaceView.SurfaceEvents {
+                override fun onVideoSurfaceAvailable(surface: Surface) {
+                    val engine = mpv ?: return
+                    try {
+                        engine.attachSurface(surface)
+                        pendingMpvPath?.let { path ->
+                            engine.command(arrayOf("loadfile", path, "replace"))
+                            pendingMpvPath = null
+                        }
+                    } catch (error: Exception) {
+                        android.util.Log.e("PanoPlay", "mpv surface attach failed", error)
+                        Toast.makeText(this@MainActivity, "VR video output failed", Toast.LENGTH_LONG).show()
+                    }
+                }
+                override fun onVideoSurfaceDestroyed(surface: Surface) {
+                    try { mpv?.detachSurface() } catch (_: Exception) { }
+                }
+            }
+        }
+        videoFrame.addView(vrView, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
 
         val viewBadge = text("FLAT 2D", 10f, Color.WHITE, true).apply {
             setPadding(dp(12), dp(7), dp(12), dp(7))
@@ -571,20 +606,24 @@ class MainActivity : Activity() {
     private fun setProjection(projection: VrVideoSurfaceView.Projection) {
         currentProjection = projection
         if (projection == VrVideoSurfaceView.Projection.FLAT) {
-            // Keep the working Media3 flat playback path.
+            vrView.visibility = View.GONE
             playerView.visibility = View.VISIBLE
             PlayerView.switchTargetView(player, sphericalPlayerView, playerView)
             sphericalPlayerView.visibility = View.GONE
+            mpv?.setPropertyBoolean("pause", true)
+            currentUri?.let { uri ->
+                player.setMediaItem(MediaItem.fromUri(uri))
+                player.prepare()
+                player.playWhenReady = true
+            }
         } else {
-            // ExoPlayer's own spherical surface manages GL lifecycle and video output.
-            // Keep its built-in stereo mode MONO: our projection mesh below crops the
-            // exact source eye, which also supports SBS RIGHT without double-cropping.
-            sphericalView?.setDefaultStereoMode(C.STEREO_MODE_MONO)
-            sphericalView?.setUseSensorRotation(false)
-            sphericalPlayerView.visibility = View.VISIBLE
-            PlayerView.switchTargetView(player, playerView, sphericalPlayerView)
+            player.pause()
             playerView.visibility = View.GONE
-            queueSphericalProjection(projection, stereoLayout)
+            sphericalPlayerView.visibility = View.GONE
+            vrView.visibility = View.VISIBLE
+            vrView.setProjection(projection)
+            vrView.setStereoLayout(stereoLayout)
+            currentUri?.let { loadMpvUri(it) }
         }
         val projectionLabel = when (projection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
@@ -722,12 +761,47 @@ class MainActivity : Activity() {
         // Every newly opened video starts in the requested default viewing mode.
         stereoLayout = VrVideoSurfaceView.StereoLayout.SBS_LEFT
         updateModeChips()
+        currentUri = uri
         setProjection(VrVideoSurfaceView.Projection.VR180)
         titleView.text = currentVideoName
         placeholder.visibility = View.VISIBLE
-        player.setMediaItem(MediaItem.fromUri(uri))
-        player.prepare()
-        player.playWhenReady = true
+        loadMpvUri(uri)
+    }
+
+
+    private fun initializeMpv() {
+        mpv = MPVLib.create(this) ?: throw IllegalStateException("Unable to create libmpv")
+        val engine = mpv!!
+        engine.setOptionString("vo", "gpu")
+        engine.setOptionString("gpu-context", "android")
+        engine.setOptionString("gpu-api", "opengl")
+        engine.setOptionString("hwdec", "auto-safe")
+        engine.setOptionString("video-sync", "display-resample")
+        engine.setOptionString("keep-open", "yes")
+        engine.setOptionString("audio-display", "no")
+        engine.setOptionString("osd-level", "0")
+        engine.init()
+    }
+
+    private fun loadMpvUri(uri: Uri) {
+        val engine = mpv ?: return
+        try {
+            val descriptor = contentResolver.openFileDescriptor(uri, "r")
+                ?: throw IllegalStateException("Cannot open selected video")
+            try { mpvDescriptor?.close() } catch (_: Exception) { }
+            mpvDescriptor = descriptor
+            val path = "/proc/self/fd/${descriptor.fd}"
+            pendingMpvPath = path
+            if (vrView.isShown) {
+                engine.command(arrayOf("loadfile", path, "replace"))
+                pendingMpvPath = null
+            }
+            placeholder.visibility = View.GONE
+        } catch (error: Exception) {
+            android.util.Log.e("PanoPlay", "Unable to open VR video", error)
+            Toast.makeText(this, "Can't open this video", Toast.LENGTH_LONG).show()
+            placeholder.visibility = View.VISIBLE
+        }
     }
 
     private fun queryDisplayName(uri: Uri): String {
@@ -859,11 +933,14 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onResume()
+        if (::vrView.isInitialized) vrView.onResume()
     }
 
     override fun onPause() {
+        if (::vrView.isInitialized) vrView.onPause()
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onPause()
         if (::player.isInitialized) player.pause()
+        try { mpv?.setPropertyBoolean("pause", true) } catch (_: Exception) { }
         super.onPause()
     }
 
@@ -872,6 +949,10 @@ class MainActivity : Activity() {
         if (::playerView.isInitialized) playerView.player = null
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.player = null
         if (::player.isInitialized) player.release()
+        try { mpv?.destroy() } catch (_: Exception) { }
+        mpv = null
+        try { mpvDescriptor?.close() } catch (_: Exception) { }
+        mpvDescriptor = null
         super.onDestroy()
     }
 
