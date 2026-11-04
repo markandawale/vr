@@ -132,6 +132,10 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         private var width = 1
         private var height = 1
         private var videoAspect = 16f / 9f
+        // Keep the decoder's dimensions even if Media3 reports them before the
+        // GLSurfaceView becomes visible and creates its SurfaceTexture.
+        private var videoWidth = 0
+        private var videoHeight = 0
         private var projection = Projection.FLAT
         private var stereoLayout = StereoLayout.MONO
         private var yaw = 0f
@@ -174,6 +178,9 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             oldTexture?.release()
             surfaceTexture = SurfaceTexture(oesTextureId).also {
                 it.setOnFrameAvailableListener(this)
+                if (videoWidth > 0 && videoHeight > 0) {
+                    it.setDefaultBufferSize(videoWidth, videoHeight)
+                }
             }
             outputSurface = Surface(surfaceTexture)
             val created = outputSurface!!
@@ -265,6 +272,8 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         }
 
         fun setVideoSize(width: Int, height: Int, rotationDegrees: Int, pixelRatio: Float) {
+            videoWidth = width
+            videoHeight = height
             val rotated = rotationDegrees == 90 || rotationDegrees == 270
             val displayWidth = if (rotated) height else width
             val displayHeight = if (rotated) width else height
