@@ -586,119 +586,99 @@ class MainActivity : Activity() {
     private fun setProjection(projection: VrVideoSurfaceView.Projection) {
         currentProjection = projection
         if (projection == VrVideoSurfaceView.Projection.FLAT) {
-            // Keep the working Media3 flat playback path.
+            try { mpv?.setPropertyBoolean("pause", true) } catch (_: Exception) { }
+            mpvSurfaceView.visibility = View.GONE
             playerView.visibility = View.VISIBLE
             PlayerView.switchTargetView(player, sphericalPlayerView, playerView)
             sphericalPlayerView.visibility = View.GONE
         } else {
-            // ExoPlayer's own spherical surface manages GL lifecycle and video output.
-            // Keep its built-in stereo mode MONO: our projection mesh below crops the
-            // exact source eye, which also supports SBS RIGHT without double-cropping.
-            sphericalView?.setDefaultStereoMode(C.STEREO_MODE_MONO)
-            sphericalView?.setUseSensorRotation(false)
-            sphericalPlayerView.visibility = View.VISIBLE
-            PlayerView.switchTargetView(player, playerView, sphericalPlayerView)
+            player.pause()
             playerView.visibility = View.GONE
-            queueSphericalProjection(projection, stereoLayout)
+            sphericalPlayerView.visibility = View.GONE
+            mpvSurfaceView.visibility = View.VISIBLE
+            updateMpvShaderOptions()
+            currentUri?.let { loadMpvUri(it) }
         }
         val projectionLabel = when (projection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
             VrVideoSurfaceView.Projection.VR180 -> "180° VIEW"
             VrVideoSurfaceView.Projection.VR360 -> "360° VIEW"
         }
-        modeBadge.text = if (projection != VrVideoSurfaceView.Projection.FLAT &&
-            stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT) {
-            "$projectionLabel · LEFT EYE"
-        } else projectionLabel
+        val eyeLabel = when (stereoLayout) {
+            VrVideoSurfaceView.StereoLayout.MONO -> "MONO"
+            VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "LEFT EYE"
+            VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "RIGHT EYE"
+        }
+        modeBadge.text = if (projection == VrVideoSurfaceView.Projection.FLAT) projectionLabel else "$" + "projectionLabel · $" + "eyeLabel"
         updateModeChips()
     }
 
-    /**
-     * Overrides Media3's default full-sphere mesh on its GL thread. Media3 1.11.1
-     * keeps Projection/ProjectionRenderer package-private, so reflection is used
-     * only for mesh creation; decoder surfaces, frame delivery, touch input and
-     * GL lifecycle remain owned by Media3's SphericalGLSurfaceView.
-     */
-    private fun queueSphericalProjection(
-        projection: VrVideoSurfaceView.Projection,
-        layout: VrVideoSurfaceView.StereoLayout
-    ) {
-        val view = sphericalView ?: return
-        if (projection == VrVideoSurfaceView.Projection.FLAT) return
-        view.queueEvent {
-            try {
-                val projectionName = "androidx.media3.exoplayer.video.spherical.Projection"
-                val projectionClass = Class.forName(projectionName)
-                val meshClassName = "$projectionName\$Mesh"
-                val subMeshClassName = "$projectionName\$SubMesh"
-                val intType = Int::class.javaPrimitiveType!!
-                val floatType = Float::class.javaPrimitiveType!!
+    private fun initializeMpv() {
+        val engine = MPVLib.create(this) ?: throw IllegalStateException("Could not create mpv")
+        mpv = engine
+        engine.setOptionString("profile", "fast")
+        engine.setOptionString("vo", "gpu")
+        engine.setOptionString("gpu-context", "android")
+        engine.setOptionString("opengl-es", "yes")
+        engine.setOptionString("hwdec", "auto-safe")
+        engine.setOptionString("video-sync", "display-resample")
+        engine.setOptionString("keep-open", "yes")
+        engine.setOptionString("osd-level", "0")
+        engine.setOptionString("audio-display", "no")
+        engine.setOptionString("force-window", "no")
+        engine.setOptionString("idle", "once")
+        engine.init()
+        val shader = java.io.File(filesDir, "panoplay-vr.glsl")
+        assets.open("panoplay-vr.glsl").use { input ->
+            shader.outputStream().use { output -> input.copyTo(output) }
+        }
+        engine.command(arrayOf("change-list", "glsl-shaders", "append", shader.absolutePath))
+    }
 
-                val factory = projectionClass.getDeclaredMethod(
-                    "createEquirectangular",
-                    floatType, intType, intType, floatType, floatType, intType
-                ).apply { isAccessible = true }
-                val horizontalFov = if (projection == VrVideoSurfaceView.Projection.VR180) 180f else 360f
-                val baseProjection = factory.invoke(
-                    null, 50f, 36, 72, 180f, horizontalFov, C.STEREO_MODE_MONO
-                )
-                val sourceMeshField = projectionClass.getField("leftMesh").apply { isAccessible = true }
-                val sourceMesh = sourceMeshField.get(baseProjection)
-                val meshClass = Class.forName(meshClassName)
-                val subMeshClass = Class.forName(subMeshClassName)
-                val getSubMesh = meshClass.getMethod("getSubMesh", intType).apply { isAccessible = true }
-                val sourceSubMesh = getSubMesh.invoke(sourceMesh, 0)
+    private fun updateMpvShaderOptions() {
+        val engine = mpv ?: return
+        val projectionName = if (currentProjection == VrVideoSurfaceView.Projection.VR180) "half_equirectangular" else "equirectangular"
+        val eyeName = when (stereoLayout) {
+            VrVideoSurfaceView.StereoLayout.MONO, VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "left"
+            VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "right"
+        }
+        val params = "yaw=$" + "mpvYaw,pitch=$" + "mpvPitch,fov=1.745329252,source_projection=$" + "projectionName,eye=$" + "eyeName"
+        engine.command(arrayOf("no-osd", "change-list", "glsl-shader-opts", "set", params))
+    }
 
-                val textureCoordsField = subMeshClass.getField("textureCoords").apply { isAccessible = true }
-                val textureCoords = (textureCoordsField.get(sourceSubMesh) as FloatArray).clone()
-                val cropStart = when (layout) {
-                    VrVideoSurfaceView.StereoLayout.MONO,
-                    VrVideoSurfaceView.StereoLayout.SBS_LEFT -> 0f
-                    VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> 0.5f
-                }
-                val cropWidth = if (layout == VrVideoSurfaceView.StereoLayout.MONO) 1f else 0.5f
-                for (i in textureCoords.indices step 2) {
-                    textureCoords[i] = cropStart + textureCoords[i] * cropWidth
-                }
-
-                val textureIdField = subMeshClass.getField("textureId").apply { isAccessible = true }
-                val verticesField = subMeshClass.getField("vertices").apply { isAccessible = true }
-                val modeField = subMeshClass.getField("mode").apply { isAccessible = true }
-                val subMeshConstructor = subMeshClass.getConstructor(
-                    intType, FloatArray::class.java, FloatArray::class.java, intType
-                ).apply { isAccessible = true }
-                val selectedSubMesh = subMeshConstructor.newInstance(
-                    textureIdField.getInt(sourceSubMesh),
-                    verticesField.get(sourceSubMesh) as FloatArray,
-                    textureCoords,
-                    modeField.getInt(sourceSubMesh)
-                )
-                val subMeshArray = java.lang.reflect.Array.newInstance(subMeshClass, 1)
-                java.lang.reflect.Array.set(subMeshArray, 0, selectedSubMesh)
-                val meshConstructor = meshClass.getConstructor(subMeshArray.javaClass).apply { isAccessible = true }
-                val selectedMesh = meshConstructor.newInstance(subMeshArray)
-                val projectionConstructor = projectionClass.getConstructor(meshClass, intType).apply { isAccessible = true }
-                val selectedProjection = projectionConstructor.newInstance(selectedMesh, C.STEREO_MODE_MONO)
-
-                val sceneField = view.javaClass.getDeclaredField("scene").apply { isAccessible = true }
-                val scene = sceneField.get(view)
-                val rendererField = scene.javaClass.getDeclaredField("projectionRenderer").apply { isAccessible = true }
-                val projectionRenderer = rendererField.get(scene)
-                val setProjection = projectionRenderer.javaClass
-                    .getDeclaredMethod("setProjection", projectionClass).apply { isAccessible = true }
-                setProjection.invoke(projectionRenderer, selectedProjection)
-            } catch (error: Exception) {
-                android.util.Log.e("PanoPlay", "Could not apply spherical projection", error)
-                mainHandler.post {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Panorama setup failed: ${error.javaClass.simpleName}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
+    private fun loadMpvUri(uri: Uri) {
+        val engine = mpv ?: return
+        if (mpvLoadedUri == uri.toString()) { engine.setPropertyBoolean("pause", false); return }
+        try {
+            val descriptor = contentResolver.openFileDescriptor(uri, "r") ?: throw IllegalStateException("Cannot open video")
+            try { mpvDescriptor?.close() } catch (_: Exception) { }
+            mpvDescriptor = descriptor
+            val path = "/proc/self/fd/$" + "{descriptor.fd}"
+            pendingMpvPath = path
+            mpvLoadedUri = uri.toString()
+            if (mpvSurfaceView.holder.surface.isValid) {
+                updateMpvShaderOptions()
+                engine.command(arrayOf("loadfile", path, "replace"))
+                pendingMpvPath = null
             }
+            placeholder.visibility = View.GONE
+        } catch (error: Exception) {
+            android.util.Log.e("PanoPlay", "Unable to open video with mpv", error)
+            Toast.makeText(this, "Can't open this video", Toast.LENGTH_LONG).show()
+            placeholder.visibility = View.VISIBLE
         }
     }
+
+    private fun activePositionMs(): Long = if (currentProjection == VrVideoSurfaceView.Projection.FLAT) player.currentPosition.coerceAtLeast(0L) else ((mpv?.getPropertyDouble("time-pos") ?: 0.0) * 1000.0).toLong().coerceAtLeast(0L)
+    private fun activeDurationMs(): Long = if (currentProjection == VrVideoSurfaceView.Projection.FLAT) player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L else ((mpv?.getPropertyDouble("duration") ?: 0.0) * 1000.0).toLong().coerceAtLeast(0L)
+    private fun seekActiveTo(ms: Long) { if (currentProjection == VrVideoSurfaceView.Projection.FLAT) player.seekTo(ms) else mpv?.command(arrayOf("seek", (ms.coerceAtLeast(0L) / 1000.0).toString(), "absolute")) }
+    private fun seekRelative(delta: Long) { val d = activeDurationMs(); val p = (activePositionMs() + delta).coerceAtLeast(0L); seekActiveTo(if (d > 0L) p.coerceAtMost(d) else p) }
+    private fun toggleActivePlayback() {
+        if (currentProjection == VrVideoSurfaceView.Projection.FLAT) {
+            if (player.isPlaying) player.pause() else { if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L); player.play() }
+        } else { val paused = mpv?.getPropertyBoolean("pause") ?: true; mpv?.setPropertyBoolean("pause", !paused); updatePlayButtons(paused) }
+    }
+    private fun updatePlayButtons(playing: Boolean) { if (::playButton.isInitialized) playButton.text = if (playing) "Ⅱ" else "▶"; if (::overlayPlayButton.isInitialized) overlayPlayButton.text = if (playing) "Ⅱ" else "▶" }
 
     private fun updateModeChips() {
         fun style(view: TextView, active: Boolean) {
