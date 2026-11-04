@@ -81,7 +81,6 @@ class MainActivity : Activity() {
     private lateinit var seekBar: SeekBar
     private lateinit var currentTimeView: TextView
     private lateinit var durationView: TextView
-    private lateinit var rotateButton: TextView
     private lateinit var fullscreenButton: TextView
     private lateinit var overlayPlayButton: TextView
     private lateinit var overlaySeekBar: SeekBar
@@ -466,11 +465,9 @@ class MainActivity : Activity() {
                 player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-        rotateButton = transportButton("ROTATE").apply { setOnClickListener { toggleOrientation() } }
         transport.addView(backButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { rightMargin = dp(6) })
         transport.addView(playButton, LinearLayout.LayoutParams(dp(62), dp(46)).apply { leftMargin = dp(6); rightMargin = dp(6) })
         transport.addView(forwardButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { leftMargin = dp(6); rightMargin = dp(6) })
-        transport.addView(rotateButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { leftMargin = dp(6) })
         root.addView(transport)
         fullscreenChrome.add(transport)
 
@@ -781,7 +778,12 @@ class MainActivity : Activity() {
                 onVideoTap = null
                 shouldIgnoreTap = null
             }
-            setFullscreenControlsVisible(true)
+            // The translucent overlay controller belongs exclusively to fullscreen.
+            // Keep the normal-screen controls and fullscreen-entry button available.
+            fullscreenControlsVisible = false
+            fullscreenControls.visibility = View.GONE
+            fullscreenButton.visibility = View.VISIBLE
+            modeBadge.visibility = View.VISIBLE
         }
     }
 
