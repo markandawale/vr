@@ -35,6 +35,38 @@ import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
 import java.util.Locale
 
+private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
+    var onVideoTap: (() -> Unit)? = null
+    var shouldIgnoreTap: ((Float, Float) -> Boolean)? = null
+    private var startX = 0f
+    private var startY = 0f
+    private var startTime = 0L
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        // Let the actual video surface receive the complete gesture first.
+        // This is essential: VR surfaces need the full DOWN/MOVE/UP sequence for panning.
+        val handled = super.dispatchTouchEvent(event)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                startX = event.x
+                startY = event.y
+                startTime = android.os.SystemClock.uptimeMillis()
+            }
+            MotionEvent.ACTION_UP -> {
+                val dx = event.x - startX
+                val dy = event.y - startY
+                val elapsed = android.os.SystemClock.uptimeMillis() - startTime
+                val slop = 14f * resources.displayMetrics.density
+                if (elapsed < 350L && dx * dx + dy * dy < slop * slop &&
+                    shouldIgnoreTap?.invoke(event.x, event.y) != true
+                ) onVideoTap?.invoke()
+            }
+            MotionEvent.ACTION_CANCEL -> startTime = 0L
+        }
+        return handled
+    }
+}
+
 @OptIn(UnstableApi::class)
 class MainActivity : Activity() {
     private lateinit var player: ExoPlayer
@@ -190,7 +222,7 @@ class MainActivity : Activity() {
         root.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
         fullscreenChrome.add(header)
 
-        videoFrame = FrameLayout(this).apply {
+        videoFrame = TapDetectFrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             clipToOutline = false
         }
@@ -703,7 +735,7 @@ class MainActivity : Activity() {
             rootLayout.clipToPadding = false
             rootLayout.clipChildren = false
             window.setBackgroundDrawableResource(android.R.color.black)
-            fullscreenButton.text = "✕"
+            fullscreenButton.text = "⛶"
             fullscreenButton.contentDescription = "Exit full screen"
             enterImmersiveMode()
         } else {
@@ -726,9 +758,20 @@ class MainActivity : Activity() {
         fullscreenButton.layoutParams = buttonParams
         videoFrame.layoutParams = params
         if (isFullscreen) {
-            installFullscreenTapToggle()
+            (videoFrame as TapDetectFrameLayout).apply {
+                onVideoTap = { setFullscreenControlsVisible(!fullscreenControlsVisible) }
+                shouldIgnoreTap = { x, y ->
+                    fun inside(view: View): Boolean = view.visibility == View.VISIBLE &&
+                        x >= view.left && x <= view.right && y >= view.top && y <= view.bottom
+                    inside(fullscreenControls) || inside(fullscreenButton)
+                }
+            }
             setFullscreenControlsVisible(true)
         } else {
+            (videoFrame as TapDetectFrameLayout).apply {
+                onVideoTap = null
+                shouldIgnoreTap = null
+            }
             setFullscreenControlsVisible(true)
         }
     }
@@ -739,40 +782,6 @@ class MainActivity : Activity() {
         fullscreenControls.visibility = visibility
         fullscreenButton.visibility = visibility
         modeBadge.visibility = visibility
-    }
-
-    private fun installFullscreenTapToggle() {
-        var downX = 0f
-        var downY = 0f
-        var downAt = 0L
-        val tapListener = View.OnTouchListener { view, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    downX = event.x
-                    downY = event.y
-                    downAt = android.os.SystemClock.uptimeMillis()
-                }
-                MotionEvent.ACTION_UP -> {
-                    val dx = event.x - downX
-                    val dy = event.y - downY
-                    val elapsed = android.os.SystemClock.uptimeMillis() - downAt
-                    if (elapsed < 350L && dx * dx + dy * dy < dp(18) * dp(18)) {
-                        setFullscreenControlsVisible(!fullscreenControlsVisible)
-                    }
-                }
-            }
-            false
-        }
-        fun attachTapListener(view: View) {
-            view.setOnTouchListener(tapListener)
-            if (view is ViewGroup) {
-                for (index in 0 until view.childCount) attachTapListener(view.getChildAt(index))
-            }
-        }
-        attachTapListener(videoFrame)
-        attachTapListener(playerView)
-        attachTapListener(sphericalPlayerView)
-        sphericalView?.let { attachTapListener(it) }
     }
 
     @Suppress("DEPRECATION")
