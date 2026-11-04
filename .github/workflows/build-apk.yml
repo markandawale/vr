@@ -4,7 +4,7 @@ name: Build PanoPlay APK
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, 'experiment/spherical-smoothness-v2' ]
   pull_request:
     branches: [ main, master ]
 
