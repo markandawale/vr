@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.database.Cursor
 import android.graphics.Color
+import android.graphics.SurfaceTexture
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -38,6 +39,9 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
+import org.videolan.libvlc.LibVLC
+import org.videolan.libvlc.Media as VlcMedia
+import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
 import java.util.Locale
 import kotlin.math.sqrt
 
@@ -79,6 +83,14 @@ class MainActivity : Activity() {
     private lateinit var playerView: PlayerView
     private lateinit var sphericalPlayerView: PlayerView
     private var sphericalView: SphericalGLSurfaceView? = null
+    private var vrSurfaceView: VrVideoSurfaceView? = null
+    private var vlc: LibVLC? = null
+    private var vlcPlayer: VlcMediaPlayer? = null
+    private var vlcSurfaceTexture: SurfaceTexture? = null
+    private var vlcSurfaceAttached = false
+    private var useVlcForVr = false
+    private var currentVideoUri: Uri? = null
+    private var pendingVlcUri: Uri? = null
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var titleView: TextView
