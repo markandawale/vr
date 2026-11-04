@@ -96,7 +96,7 @@ class MainActivity : Activity() {
 
     private var isScrubbing = false
     private var sourceAspectRatio = 16f / 9f
-    private var currentProjection = VrVideoSurfaceView.Projection.FLAT
+    private var currentProjection = VrVideoSurfaceView.Projection.VR180
     private var isLandscape = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -167,18 +167,8 @@ class MainActivity : Activity() {
                 val displayWidth = if (rotated) videoSize.height else videoSize.width
                 val displayHeight = if (rotated) videoSize.width else videoSize.height
                 sourceAspectRatio = displayWidth * videoSize.pixelWidthHeightRatio / displayHeight.coerceAtLeast(1)
-                // 360° SBS equirectangular files are normally around 4:1 overall.
-                // 2:1 is usually mono 360°, so let users choose SBS manually for 180° sources.
-                val detectedStereo = if (sourceAspectRatio >= 3.5f) {
-                    VrVideoSurfaceView.StereoLayout.SBS_LEFT
-                } else {
-                    VrVideoSurfaceView.StereoLayout.MONO
-                }
-                if (!stereoLayoutManuallySelected && stereoLayout != detectedStereo) {
-                    stereoLayout = detectedStereo
-                    updateModeChips()
-                    if (currentProjection != VrVideoSurfaceView.Projection.FLAT) setProjection(currentProjection)
-                }
+                // Keep the user's selected/default eye layout. Do not auto-switch
+                // SBS LEFT to MONO based on aspect ratio: 180° SBS files can be 2:1.
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -438,9 +428,13 @@ class MainActivity : Activity() {
                 }
             })
         }
-        seekRow.addView(currentTimeView, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT))
+        currentTimeView.gravity = Gravity.CENTER_VERTICAL or Gravity.START
+        currentTimeView.includeFontPadding = false
+        durationView.gravity = Gravity.CENTER_VERTICAL or Gravity.END
+        durationView.includeFontPadding = false
+        seekRow.addView(currentTimeView, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.MATCH_PARENT))
         seekRow.addView(seekBar, LinearLayout.LayoutParams(0, dp(30), 1f))
-        seekRow.addView(durationView, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END })
+        seekRow.addView(durationView, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.MATCH_PARENT))
         root.addView(seekRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34)))
         fullscreenChrome.add(seekRow)
 
@@ -465,9 +459,17 @@ class MainActivity : Activity() {
                 player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-        transport.addView(backButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { rightMargin = dp(6) })
-        transport.addView(playButton, LinearLayout.LayoutParams(dp(62), dp(46)).apply { leftMargin = dp(6); rightMargin = dp(6) })
-        transport.addView(forwardButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { leftMargin = dp(6); rightMargin = dp(6) })
+        // Give both skip controls identical widths and symmetric spacing so their
+        // "10" labels sit optically centred on both sides of the play button.
+        transport.addView(backButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+            leftMargin = dp(6); rightMargin = dp(6)
+        })
+        transport.addView(playButton, LinearLayout.LayoutParams(dp(62), dp(46)).apply {
+            leftMargin = dp(6); rightMargin = dp(6)
+        })
+        transport.addView(forwardButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+            leftMargin = dp(6); rightMargin = dp(6)
+        })
         root.addView(transport)
         fullscreenChrome.add(transport)
 
@@ -515,8 +517,7 @@ class MainActivity : Activity() {
     private lateinit var monoChip: TextView
     private lateinit var leftEyeChip: TextView
     private lateinit var rightEyeChip: TextView
-    private var stereoLayout = VrVideoSurfaceView.StereoLayout.MONO
-    private var stereoLayoutManuallySelected = false
+    private var stereoLayout = VrVideoSurfaceView.StereoLayout.SBS_LEFT
 
     private fun stereoChip(label: String, layout: VrVideoSurfaceView.StereoLayout): TextView =
         text(label, 10f, Color.WHITE, true).apply {
@@ -694,9 +695,10 @@ class MainActivity : Activity() {
             // Some document providers do not offer persistable permissions.
         }
         currentVideoName = queryDisplayName(uri).ifBlank { "Selected video" }
-        stereoLayoutManuallySelected = false
-        stereoLayout = VrVideoSurfaceView.StereoLayout.MONO
+        // Every newly opened video starts in the requested default viewing mode.
+        stereoLayout = VrVideoSurfaceView.StereoLayout.SBS_LEFT
         updateModeChips()
+        setProjection(VrVideoSurfaceView.Projection.VR180)
         titleView.text = currentVideoName
         placeholder.visibility = View.VISIBLE
         player.setMediaItem(MediaItem.fromUri(uri))
