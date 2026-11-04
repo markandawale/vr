@@ -9,6 +9,8 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.ParcelFileDescriptor
+import dev.jdtech.mpv.MPVLib
 import android.os.Bundle
 import android.os.Build
 import android.os.Handler
@@ -32,7 +34,6 @@ import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
 import java.util.Locale
 
@@ -73,7 +74,13 @@ class MainActivity : Activity() {
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
     private lateinit var sphericalPlayerView: PlayerView
-    private var sphericalView: SphericalGLSurfaceView? = null
+    private lateinit var mpvSurfaceView: MpvSurfaceView
+    private var mpv: MPVLib? = null
+    private var mpvDescriptor: ParcelFileDescriptor? = null
+    private var pendingMpvPath: String? = null
+    private var mpvLoadedUri: String? = null
+    private var mpvYaw = 0.0
+    private var mpvPitch = 0.0
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var titleView: TextView
@@ -129,6 +136,7 @@ class MainActivity : Activity() {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
         player = ExoPlayer.Builder(this).build()
+        initializeMpv()
         buildInterface()
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
