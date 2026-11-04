@@ -48,6 +48,12 @@ class MainActivity : Activity() {
     private lateinit var currentTimeView: TextView
     private lateinit var durationView: TextView
     private lateinit var rotateButton: TextView
+    private lateinit var fullscreenButton: TextView
+    private lateinit var rootLayout: LinearLayout
+    private val fullscreenChrome = mutableListOf<View>()
+    private var isFullscreen = false
+    private var normalRootPadding = intArrayOf(0, 0, 0, 0)
+    private var normalVideoMargins = intArrayOf(0, 0)
 
     private var isScrubbing = false
     private var sourceAspectRatio = 16f / 9f
@@ -146,6 +152,8 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.rgb(9, 10, 13))
             setPadding(dp(18), dp(8), dp(18), dp(10))
         }
+        rootLayout = root
+        normalRootPadding = intArrayOf(dp(18), dp(8), dp(18), dp(10))
 
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -167,6 +175,7 @@ class MainActivity : Activity() {
         }
         header.addView(openButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)))
         root.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
+        fullscreenChrome.add(header)
 
         videoFrame = FrameLayout(this).apply {
             background = rounded(Color.rgb(18, 20, 25), 22)
@@ -201,6 +210,19 @@ class MainActivity : Activity() {
         }
         videoFrame.addView(viewBadge, badgeParams)
         modeBadge = viewBadge
+
+        fullscreenButton = text("⛶", 22f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            background = rounded(Color.argb(205, 15, 17, 22), 30)
+            elevation = dp(5).toFloat()
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            setOnClickListener { toggleFullscreen() }
+            contentDescription = "Enter full screen"
+        }
+        val fullscreenParams = FrameLayout.LayoutParams(dp(46), dp(42), Gravity.TOP or Gravity.END).apply {
+            setMargins(0, dp(12), dp(12), 0)
+        }
+        videoFrame.addView(fullscreenButton, fullscreenParams)
 
         placeholder = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -237,6 +259,7 @@ class MainActivity : Activity() {
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
         root.addView(titleView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(24)))
+        fullscreenChrome.add(titleView)
 
         val modeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -250,6 +273,7 @@ class MainActivity : Activity() {
         modeRow.addView(oneEightyChip, LinearLayout.LayoutParams(0, dp(42), 1f).apply { leftMargin = dp(5); rightMargin = dp(5) })
         modeRow.addView(threeSixtyChip, LinearLayout.LayoutParams(0, dp(42), 1f).apply { leftMargin = dp(5) })
         root.addView(modeRow)
+        fullscreenChrome.add(modeRow)
 
         val stereoRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -263,6 +287,7 @@ class MainActivity : Activity() {
         stereoRow.addView(leftEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
         stereoRow.addView(rightEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4) })
         root.addView(stereoRow)
+        fullscreenChrome.add(stereoRow)
 
         val seekRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -296,6 +321,7 @@ class MainActivity : Activity() {
         seekRow.addView(seekBar, LinearLayout.LayoutParams(0, dp(30), 1f))
         seekRow.addView(durationView, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END })
         root.addView(seekRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34)))
+        fullscreenChrome.add(seekRow)
 
         val transport = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -324,6 +350,7 @@ class MainActivity : Activity() {
         transport.addView(forwardButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { leftMargin = dp(6); rightMargin = dp(6) })
         transport.addView(rotateButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { leftMargin = dp(6) })
         root.addView(transport)
+        fullscreenChrome.add(transport)
 
         val hint = text("DRAG TO LOOK AROUND  •  PINCH TO ZOOM  •  MONO / 180° / 360° SBS", 9f, Color.rgb(119, 125, 136), true).apply {
             gravity = Gravity.CENTER
@@ -331,6 +358,7 @@ class MainActivity : Activity() {
             setPadding(0, dp(6), 0, dp(2))
         }
         root.addView(hint, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(22)))
+        fullscreenChrome.add(hint)
 
         setContentView(root)
         root.setOnApplyWindowInsetsListener { view, insets ->
@@ -566,10 +594,79 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun toggleFullscreen() {
+        isFullscreen = !isFullscreen
+        fullscreenChrome.forEach { it.visibility = if (isFullscreen) View.GONE else View.VISIBLE }
+        val params = videoFrame.layoutParams as LinearLayout.LayoutParams
+        if (isFullscreen) {
+            normalVideoMargins[0] = params.topMargin
+            normalVideoMargins[1] = params.bottomMargin
+            params.topMargin = 0
+            params.bottomMargin = 0
+            params.height = 0
+            params.weight = 1f
+            rootLayout.setPadding(0, 0, 0, 0)
+            fullscreenButton.text = "✕"
+            fullscreenButton.contentDescription = "Exit full screen"
+            enterImmersiveMode()
+        } else {
+            params.topMargin = normalVideoMargins[0]
+            params.bottomMargin = normalVideoMargins[1]
+            params.height = 0
+            params.weight = 1f
+            rootLayout.setPadding(
+                normalRootPadding[0], normalRootPadding[1],
+                normalRootPadding[2], normalRootPadding[3]
+            )
+            fullscreenButton.text = "⛶"
+            fullscreenButton.contentDescription = "Enter full screen"
+            exitImmersiveMode()
+        }
+        videoFrame.layoutParams = params
+    }
+
+    @Suppress("DEPRECATION")
+    private fun enterImmersiveMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.let { controller ->
+                controller.hide(WindowInsets.Type.systemBars())
+                controller.systemBarsBehavior =
+                    android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            )
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun exitImmersiveMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.show(WindowInsets.Type.systemBars())
+        } else {
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        }
+    }
+
     private fun toggleOrientation() {
         isLandscape = !isLandscape
         requestedOrientation = if (isLandscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         rotateButton.text = if (isLandscape) "PORTRAIT" else "ROTATE"
+    }
+
+    @Deprecated("Use OnBackInvokedDispatcher on newer Android versions")
+    override fun onBackPressed() {
+        if (isFullscreen) {
+            toggleFullscreen()
+        } else {
+            super.onBackPressed()
+        }
     }
 
     override fun onResume() {
