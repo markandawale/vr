@@ -204,7 +204,8 @@ class MainActivity : Activity() {
         // Flat playback uses Media3's standard SurfaceView output. This avoids
         // relying on the custom OpenGL external-texture path for ordinary video.
         playerView = LayoutInflater.from(this).inflate(R.layout.video_player, videoFrame, false) as PlayerView
-        playerView.player = player
+        playerView.player = null
+        playerView.visibility = View.GONE
         videoFrame.addView(playerView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         // Touch-controlled phone-screen panorama output (no headset required).
