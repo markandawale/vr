@@ -84,6 +84,7 @@ class MainActivity : Activity() {
     private var mpv: MPVLib? = null
     private var mpvDescriptor: ParcelFileDescriptor? = null
     private var currentUri: Uri? = null
+    private var mpvLoadedUri: String? = null
     private var pendingMpvPath: String? = null
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
@@ -811,6 +812,10 @@ class MainActivity : Activity() {
 
     private fun loadMpvUri(uri: Uri) {
         val engine = mpv ?: return
+        if (mpvLoadedUri == uri.toString()) {
+            engine.setPropertyBoolean("pause", false)
+            return
+        }
         try {
             val descriptor = contentResolver.openFileDescriptor(uri, "r")
                 ?: throw IllegalStateException("Cannot open selected video")
@@ -818,6 +823,7 @@ class MainActivity : Activity() {
             mpvDescriptor = descriptor
             val path = "/proc/self/fd/${descriptor.fd}"
             pendingMpvPath = path
+            mpvLoadedUri = uri.toString()
             if (vrView.isShown) {
                 engine.command(arrayOf("loadfile", path, "replace"))
                 pendingMpvPath = null
