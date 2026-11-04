@@ -95,6 +95,12 @@ class MainActivity : Activity() {
                 }
             }
 
+            override fun onRenderedFirstFrame() {
+                if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+                    queueSphericalProjection(currentProjection, stereoLayout)
+                }
+            }
+
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 val rotated = videoSize.unappliedRotationDegrees == 90 || videoSize.unappliedRotationDegrees == 270
                 val displayWidth = if (rotated) videoSize.height else videoSize.width
@@ -243,11 +249,9 @@ class MainActivity : Activity() {
         monoChip = stereoChip("MONO", VrVideoSurfaceView.StereoLayout.MONO)
         leftEyeChip = stereoChip("SBS LEFT", VrVideoSurfaceView.StereoLayout.SBS_LEFT)
         rightEyeChip = stereoChip("SBS RIGHT", VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
-        // The Media3 spherical renderer selects the left half for phone viewing.
-        // Hide the right-eye option until a true right-eye texture override is added.
         stereoRow.addView(monoChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { rightMargin = dp(4) })
-        stereoRow.addView(leftEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4) })
-        rightEyeChip.visibility = View.GONE
+        stereoRow.addView(leftEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
+        stereoRow.addView(rightEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4) })
         root.addView(stereoRow)
 
         val seekRow = LinearLayout(this).apply {
@@ -383,16 +387,14 @@ class MainActivity : Activity() {
             sphericalPlayerView.visibility = View.GONE
         } else {
             // ExoPlayer's own spherical surface manages GL lifecycle and video output.
-            val defaultStereo = when (stereoLayout) {
-                VrVideoSurfaceView.StereoLayout.MONO -> C.STEREO_MODE_MONO
-                VrVideoSurfaceView.StereoLayout.SBS_LEFT,
-                VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> C.STEREO_MODE_LEFT_RIGHT
-            }
-            sphericalView?.setDefaultStereoMode(defaultStereo)
+            // Keep its built-in stereo mode MONO: our projection mesh below crops the
+            // exact source eye, which also supports SBS RIGHT without double-cropping.
+            sphericalView?.setDefaultStereoMode(C.STEREO_MODE_MONO)
             sphericalView?.setUseSensorRotation(false)
             sphericalPlayerView.visibility = View.VISIBLE
             PlayerView.switchTargetView(player, playerView, sphericalPlayerView)
             playerView.visibility = View.GONE
+            queueSphericalProjection(projection, stereoLayout)
         }
         val projectionLabel = when (projection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
@@ -404,6 +406,85 @@ class MainActivity : Activity() {
             "$projectionLabel · LEFT EYE"
         } else projectionLabel
         updateModeChips()
+    }
+
+    /**
+     * Overrides Media3's default full-sphere mesh on its GL thread. Media3 1.11.1
+     * keeps Projection/ProjectionRenderer package-private, so reflection is used
+     * only for mesh creation; decoder surfaces, frame delivery, touch input and
+     * GL lifecycle remain owned by Media3's SphericalGLSurfaceView.
+     */
+    private fun queueSphericalProjection(
+        projection: VrVideoSurfaceView.Projection,
+        layout: VrVideoSurfaceView.StereoLayout
+    ) {
+        val view = sphericalView ?: return
+        if (projection == VrVideoSurfaceView.Projection.FLAT) return
+        view.queueEvent {
+            try {
+                val projectionName = "androidx.media3.exoplayer.video.spherical.Projection"
+                val meshClassName = "$projectionName\$Mesh"
+                val subMeshClassName = "$projectionName\$SubMesh"
+                val intType = Int::class.javaPrimitiveType!!
+                val floatType = Float::class.javaPrimitiveType!!
+
+                val factory = projectionClass.getDeclaredMethod(
+                    "createEquirectangular",
+                    floatType, intType, intType, floatType, floatType, intType
+                ).apply { isAccessible = true }
+                val horizontalFov = if (projection == VrVideoSurfaceView.Projection.VR180) 180f else 360f
+                val baseProjection = factory.invoke(
+                    null, 50f, 36, 72, 180f, horizontalFov, C.STEREO_MODE_MONO
+                )
+                val sourceMesh = projectionClass.getField("leftMesh").get(baseProjection)
+                val meshClass = Class.forName(meshClassName)
+                val subMeshClass = Class.forName(subMeshClassName)
+                val sourceSubMesh = meshClass.getMethod("getSubMesh", intType).invoke(sourceMesh, 0)
+
+                val textureCoords = (subMeshClass.getField("textureCoords").get(sourceSubMesh) as FloatArray).clone()
+                val cropStart = when (layout) {
+                    VrVideoSurfaceView.StereoLayout.MONO,
+                    VrVideoSurfaceView.StereoLayout.SBS_LEFT -> 0f
+                    VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> 0.5f
+                }
+                val cropWidth = if (layout == VrVideoSurfaceView.StereoLayout.MONO) 1f else 0.5f
+                for (i in textureCoords.indices step 2) {
+                    textureCoords[i] = cropStart + textureCoords[i] * cropWidth
+                }
+
+                val subMeshConstructor = subMeshClass.getConstructor(
+                    intType, FloatArray::class.java, FloatArray::class.java, intType
+                )
+                val selectedSubMesh = subMeshConstructor.newInstance(
+                    subMeshClass.getField("textureId").getInt(sourceSubMesh),
+                    subMeshClass.getField("vertices").get(sourceSubMesh) as FloatArray,
+                    textureCoords,
+                    subMeshClass.getField("mode").getInt(sourceSubMesh)
+                )
+                val subMeshArray = java.lang.reflect.Array.newInstance(subMeshClass, 1)
+                java.lang.reflect.Array.set(subMeshArray, 0, selectedSubMesh)
+                val selectedMesh = meshClass.getConstructor(subMeshArray.javaClass).newInstance(subMeshArray)
+                val selectedProjection = projectionClass.getConstructor(meshClass, intType)
+                    .newInstance(selectedMesh, C.STEREO_MODE_MONO)
+
+                val sceneField = view.javaClass.getDeclaredField("scene").apply { isAccessible = true }
+                val scene = sceneField.get(view)
+                val rendererField = scene.javaClass.getDeclaredField("projectionRenderer").apply { isAccessible = true }
+                val projectionRenderer = rendererField.get(scene)
+                val setProjection = projectionRenderer.javaClass
+                    .getDeclaredMethod("setProjection", projectionClass).apply { isAccessible = true }
+                setProjection.invoke(projectionRenderer, selectedProjection)
+            } catch (error: Exception) {
+                android.util.Log.e("PanoPlay", "Could not apply spherical projection", error)
+                mainHandler.post {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Panorama setup failed: ${error.javaClass.simpleName}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
     }
 
     private fun updateModeChips() {
