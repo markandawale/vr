@@ -178,8 +178,8 @@ class MainActivity : Activity() {
         fullscreenChrome.add(header)
 
         videoFrame = FrameLayout(this).apply {
-            background = rounded(Color.rgb(18, 20, 25), 22)
-            clipToOutline = true
+            setBackgroundColor(Color.BLACK)
+            clipToOutline = false
         }
         // Flat playback uses Media3's standard SurfaceView output. This avoids
         // relying on the custom OpenGL external-texture path for ordinary video.
@@ -250,8 +250,8 @@ class MainActivity : Activity() {
         videoFrame.addView(placeholder, placeholderParams)
 
         root.addView(videoFrame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
-            topMargin = dp(14)
-            bottomMargin = dp(14)
+            topMargin = 0
+            bottomMargin = 0
         })
 
         titleView = text("No video selected", 13f, Color.WHITE, true).apply {
@@ -603,9 +603,15 @@ class MainActivity : Activity() {
             normalVideoMargins[1] = params.bottomMargin
             params.topMargin = 0
             params.bottomMargin = 0
+            params.width = ViewGroup.LayoutParams.MATCH_PARENT
             params.height = 0
+            videoFrame.setBackgroundColor(Color.BLACK)
+            videoFrame.clipToOutline = false
             params.weight = 1f
             rootLayout.setPadding(0, 0, 0, 0)
+            rootLayout.clipToPadding = false
+            rootLayout.clipChildren = false
+            window.setBackgroundDrawableResource(android.R.color.black)
             fullscreenButton.text = "✕"
             fullscreenButton.contentDescription = "Exit full screen"
             enterImmersiveMode()
