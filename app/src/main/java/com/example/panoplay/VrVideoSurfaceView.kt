@@ -178,9 +178,12 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             oldTexture?.release()
             surfaceTexture = SurfaceTexture(oesTextureId).also {
                 it.setOnFrameAvailableListener(this)
-                if (videoWidth > 0 && videoHeight > 0) {
-                    it.setDefaultBufferSize(videoWidth, videoHeight)
-                }
+                // LibVLC does not trigger Media3's onVideoSizeChanged callback.
+                // Without an explicit size, SurfaceTexture can retain its 1x1
+                // default buffer and audio may play while the GL image stays black.
+                val bufferWidth = videoWidth.takeIf { value -> value > 0 } ?: 1920
+                val bufferHeight = videoHeight.takeIf { value -> value > 0 } ?: 960
+                it.setDefaultBufferSize(bufferWidth, bufferHeight)
             }
             outputSurface = Surface(surfaceTexture)
             val createdTexture = surfaceTexture!!
