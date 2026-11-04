@@ -724,8 +724,8 @@ class MainActivity : Activity() {
         fullscreenControlsVisible = true
         fullscreenChrome.forEach { it.visibility = if (isFullscreen) View.GONE else View.VISIBLE }
         fullscreenControls.visibility = if (isFullscreen) View.VISIBLE else View.GONE
-        fullscreenButton.visibility = View.VISIBLE
-        fullscreenButton.alpha = 1f
+        // The fullscreen-entry button is only available in normal player mode.
+        fullscreenButton.visibility = if (isFullscreen) View.GONE else View.VISIBLE
         val params = videoFrame.layoutParams as LinearLayout.LayoutParams
         if (isFullscreen) {
             normalVideoMargins[0] = params.topMargin
@@ -741,8 +741,6 @@ class MainActivity : Activity() {
             rootLayout.clipToPadding = false
             rootLayout.clipChildren = false
             window.setBackgroundDrawableResource(android.R.color.black)
-            fullscreenButton.text = "⛶"
-            fullscreenButton.contentDescription = "Exit full screen"
             enterImmersiveMode()
         } else {
             params.topMargin = normalVideoMargins[0]
@@ -753,15 +751,9 @@ class MainActivity : Activity() {
                 normalRootPadding[0], normalRootPadding[1],
                 normalRootPadding[2], normalRootPadding[3]
             )
-            fullscreenButton.text = "⛶"
             fullscreenButton.contentDescription = "Enter full screen"
             exitImmersiveMode()
         }
-        val buttonParams = fullscreenButton.layoutParams as FrameLayout.LayoutParams
-        buttonParams.gravity = Gravity.BOTTOM or Gravity.END
-        buttonParams.bottomMargin = if (isFullscreen) dp(92) else dp(12)
-        buttonParams.topMargin = 0
-        fullscreenButton.layoutParams = buttonParams
         videoFrame.layoutParams = params
         if (isFullscreen) {
             (videoFrame as TapDetectFrameLayout).apply {
@@ -769,7 +761,7 @@ class MainActivity : Activity() {
                 shouldIgnoreTap = { x, y ->
                     fun inside(view: View): Boolean = view.visibility == View.VISIBLE &&
                         x >= view.left && x <= view.right && y >= view.top && y <= view.bottom
-                    inside(fullscreenControls) || inside(fullscreenButton)
+                    inside(fullscreenControls)
                 }
             }
             setFullscreenControlsVisible(true)
@@ -791,7 +783,6 @@ class MainActivity : Activity() {
         fullscreenControlsVisible = visible
         val visibility = if (visible) View.VISIBLE else View.INVISIBLE
         fullscreenControls.visibility = visibility
-        fullscreenButton.visibility = visibility
         modeBadge.visibility = visibility
     }
 
