@@ -52,6 +52,8 @@ class MainActivity : Activity() {
     private lateinit var overlayPlayButton: TextView
     private lateinit var overlaySeekBar: SeekBar
     private lateinit var fullscreenControls: LinearLayout
+    private lateinit var fullscreenCurrentTime: TextView
+    private lateinit var fullscreenDuration: TextView
     private lateinit var rootLayout: LinearLayout
     private val fullscreenChrome = mutableListOf<View>()
     private var isFullscreen = false
@@ -75,8 +77,10 @@ class MainActivity : Activity() {
                     currentTimeView.text = formatTime(position)
                 }
                 durationView.text = formatTime(duration)
-                if (::overlaySeekBar.isInitialized && !isScrubbing) {
-                    overlaySeekBar.progress = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
+                if (::overlaySeekBar.isInitialized) {
+                    if (!isScrubbing) overlaySeekBar.progress = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
+                    fullscreenCurrentTime.text = formatTime(position)
+                    fullscreenDuration.text = formatTime(duration)
                 }
             }
             mainHandler.postDelayed(this, 500L)
@@ -273,9 +277,11 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        fullscreenSeekRow.addView(text("00:00", 10f, Color.WHITE, true), LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT))
+        fullscreenCurrentTime = text("00:00", 10f, Color.WHITE, true)
+        fullscreenDuration = text("00:00", 10f, Color.WHITE, true)
+        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT))
         fullscreenSeekRow.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(30), 1f))
-        fullscreenSeekRow.addView(text("00:00", 10f, Color.WHITE, true), LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END })
+        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END })
         fullscreenControls.orientation = LinearLayout.VERTICAL
         fullscreenControls.gravity = Gravity.CENTER_HORIZONTAL
         fullscreenControls.addView(fullscreenSeekRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32)))
