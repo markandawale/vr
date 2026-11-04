@@ -423,6 +423,7 @@ class MainActivity : Activity() {
         view.queueEvent {
             try {
                 val projectionName = "androidx.media3.exoplayer.video.spherical.Projection"
+                val projectionClass = Class.forName(projectionName)
                 val meshClassName = "$projectionName\$Mesh"
                 val subMeshClassName = "$projectionName\$SubMesh"
                 val intType = Int::class.javaPrimitiveType!!
