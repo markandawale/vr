@@ -35,6 +35,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
 import java.util.Locale
+import kotlin.math.sqrt
 
 private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
     var onVideoTap: (() -> Unit)? = null
@@ -90,6 +91,9 @@ class MainActivity : Activity() {
     private lateinit var rootLayout: LinearLayout
     private val fullscreenChrome = mutableListOf<View>()
     private var isFullscreen = false
+    private var sphericalBufferWidth = -1
+    private var sphericalBufferHeight = -1
+    private var sphericalBufferIsFixed = false
     private var fullscreenControlsVisible = true
     private var normalRootPadding = intArrayOf(0, 0, 0, 0)
     private var normalVideoMargins = intArrayOf(0, 0)
@@ -234,6 +238,11 @@ class MainActivity : Activity() {
             sphericalPlayerView,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
+        // Re-evaluate the GL output buffer after the spherical view is measured,
+        // including the larger bounds used by immersive fullscreen playback.
+        sphericalPlayerView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            sphericalPlayerView.post { updateSphericalSurfaceBufferSize() }
+        }
 
         val viewBadge = text("FLAT 2D", 10f, Color.WHITE, true).apply {
             setPadding(dp(12), dp(7), dp(12), dp(7))
@@ -560,6 +569,7 @@ class MainActivity : Activity() {
             PlayerView.switchTargetView(player, playerView, sphericalPlayerView)
             playerView.visibility = View.GONE
             queueSphericalProjection(projection, stereoLayout)
+            sphericalPlayerView.post { updateSphericalSurfaceBufferSize() }
         }
         val projectionLabel = when (projection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
@@ -571,6 +581,54 @@ class MainActivity : Activity() {
             "$projectionLabel · LEFT EYE"
         } else projectionLabel
         updateModeChips()
+    }
+
+    /**
+     * Limits the spherical GL output buffer in immersive mode while preserving the
+     * full-screen view size and aspect ratio. SurfaceHolder scales this smaller buffer
+     * to the view bounds, reducing the number of pixels the GL renderer must shade.
+     * The decoder's input SurfaceTexture remains at the source video resolution.
+     */
+    private fun updateSphericalSurfaceBufferSize() {
+        val view = sphericalView ?: return
+        if (currentProjection == VrVideoSurfaceView.Projection.FLAT) return
+
+        if (!isFullscreen) {
+            if (sphericalBufferIsFixed) {
+                view.holder.setSizeFromLayout()
+                sphericalBufferWidth = -1
+                sphericalBufferHeight = -1
+                sphericalBufferIsFixed = false
+                android.util.Log.i("PanoPlay", "Restored spherical output buffer to view size")
+            }
+            return
+        }
+
+        val width = view.width
+        val height = view.height
+        if (width <= 0 || height <= 0) return
+
+        val pixelCount = width.toDouble() * height.toDouble()
+        val areaScale = sqrt(MAX_SPHERICAL_RENDER_PIXELS.toDouble() / pixelCount)
+        val dimensionScale = MAX_SPHERICAL_RENDER_DIMENSION.toDouble() / maxOf(width, height)
+        val scale = minOf(1.0, areaScale, dimensionScale)
+        val targetWidth = (width * scale).toInt().coerceAtLeast(1)
+        val targetHeight = (height * scale).toInt().coerceAtLeast(1)
+
+        if (sphericalBufferIsFixed &&
+            targetWidth == sphericalBufferWidth &&
+            targetHeight == sphericalBufferHeight
+        ) return
+
+        view.holder.setFixedSize(targetWidth, targetHeight)
+        sphericalBufferWidth = targetWidth
+        sphericalBufferHeight = targetHeight
+        sphericalBufferIsFixed = true
+        android.util.Log.i(
+            "PanoPlay",
+            "Fullscreen spherical output buffer: ${targetWidth}x${targetHeight} " +
+                "(view ${width}x${height})"
+        )
     }
 
     /**
@@ -891,5 +949,9 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_VIDEO = 4102
+        // Approximately 1.4 MP, enough for a crisp phone-sized image while avoiding
+        // an unnecessarily expensive full-panel GL render in immersive mode.
+        private const val MAX_SPHERICAL_RENDER_PIXELS = 1_400_000L
+        private const val MAX_SPHERICAL_RENDER_DIMENSION = 1920
     }
 }
