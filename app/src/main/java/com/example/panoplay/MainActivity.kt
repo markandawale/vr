@@ -380,7 +380,8 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
         }
         modeBadge.text = if (projection != VrVideoSurfaceView.Projection.FLAT &&
             stereoLayout != VrVideoSurfaceView.StereoLayout.MONO) {
-            "$projectionLabel · \${if (stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT) "LEFT EYE" else "RIGHT EYE"}"
+            val eyeLabel = if (stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT) "LEFT EYE" else "RIGHT EYE"
+            "$projectionLabel · $eyeLabel"
         } else projectionLabel
         updateModeChips()
     }
