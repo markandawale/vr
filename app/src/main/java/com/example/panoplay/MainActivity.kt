@@ -9,6 +9,8 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.media.MediaFormat
+import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.os.Build
 import android.os.Handler
@@ -27,11 +29,13 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
 import java.util.Locale
@@ -39,6 +43,7 @@ import java.util.Locale
 private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
     var onVideoTap: (() -> Unit)? = null
     var shouldIgnoreTap: ((Float, Float) -> Boolean)? = null
+    var onVideoDrag: (() -> Unit)? = null
     private var startX = 0f
     private var startY = 0f
     private var startTime = 0L
@@ -53,6 +58,7 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
                 startY = event.y
                 startTime = android.os.SystemClock.uptimeMillis()
             }
+            MotionEvent.ACTION_MOVE -> onVideoDrag?.invoke()
             MotionEvent.ACTION_UP -> {
                 val dx = event.x - startX
                 val dy = event.y - startY
@@ -96,9 +102,36 @@ class MainActivity : Activity() {
 
     private var isScrubbing = false
     private var sourceAspectRatio = 16f / 9f
-    private var currentProjection = VrVideoSurfaceView.Projection.VR180
+    @Volatile private var currentProjection = VrVideoSurfaceView.Projection.VR180
     private var isLandscape = false
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    // The Media3 spherical view normally renders continuously. With gyro rotation
+    // disabled, rendering once per decoded frame avoids spending GPU time drawing
+    // the same texture repeatedly at 60/90/120 Hz. ExoPlayer calls this listener
+    // immediately before releasing a frame to the SurfaceTexture, so wait until
+    // that frame's scheduled release time before waking the GL thread.
+    private val sphericalFrameMetadataListener = object : VideoFrameMetadataListener {
+        override fun onVideoFrameAboutToBeRendered(
+            presentationTimeUs: Long,
+            releaseTimeNs: Long,
+            format: Format,
+            mediaFormat: MediaFormat?
+        ) {
+            if (currentProjection == VrVideoSurfaceView.Projection.FLAT) return
+            val delayNanos = if (releaseTimeNs > 0L) {
+                (releaseTimeNs - System.nanoTime()).coerceAtLeast(0L)
+            } else {
+                0L
+            }
+            val delayMillis = (delayNanos + 999_999L) / 1_000_000L
+            mainHandler.postDelayed({
+                if (!isDestroyed && currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+                    sphericalView?.requestRender()
+                }
+            }, delayMillis)
+        }
+    }
 
     private val progressUpdater = object : Runnable {
         override fun run() {
@@ -129,6 +162,7 @@ class MainActivity : Activity() {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
         player = ExoPlayer.Builder(this).build()
+        player.setVideoFrameMetadataListener(sphericalFrameMetadataListener)
         buildInterface()
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -228,7 +262,17 @@ class MainActivity : Activity() {
             R.layout.spherical_video_player, videoFrame, false
         ) as PlayerView
         sphericalView = sphericalPlayerView.videoSurfaceView as? SphericalGLSurfaceView
-        sphericalView?.setUseSensorRotation(false)
+        sphericalView?.apply {
+            setUseSensorRotation(false)
+            setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY)
+        }
+        (videoFrame as? TapDetectFrameLayout)?.onVideoDrag = {
+            // The Media3 touch tracker changes the camera pose on the UI thread.
+            // Wake the dirty-mode renderer so the updated pose is visible immediately.
+            if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+                sphericalView?.requestRender()
+            }
+        }
         sphericalPlayerView.visibility = View.GONE
         videoFrame.addView(
             sphericalPlayerView,
@@ -658,6 +702,9 @@ class MainActivity : Activity() {
                 }
             }
         }
+        // This renderer no longer redraws continuously, so refresh once after
+        // replacing the projection mesh or switching the selected SBS eye.
+        view.requestRender()
     }
 
     private fun updateModeChips() {
@@ -846,7 +893,10 @@ class MainActivity : Activity() {
         mainHandler.removeCallbacks(progressUpdater)
         if (::playerView.isInitialized) playerView.player = null
         if (::sphericalPlayerView.isInitialized) sphericalPlayerView.player = null
-        if (::player.isInitialized) player.release()
+        if (::player.isInitialized) {
+            player.clearVideoFrameMetadataListener(sphericalFrameMetadataListener)
+            player.release()
+        }
         super.onDestroy()
     }
 
