@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -28,11 +29,13 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import java.util.Locale
 
 class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
     private lateinit var player: ExoPlayer
     private lateinit var vrSurface: VrVideoSurfaceView
+    private lateinit var playerView: PlayerView
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var titleView: TextView
@@ -139,8 +142,16 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
             background = rounded(Color.rgb(18, 20, 25), 22)
             clipToOutline = true
         }
+        // Flat playback uses Media3's standard SurfaceView output. This avoids
+        // relying on the custom OpenGL external-texture path for ordinary video.
+        playerView = LayoutInflater.from(this).inflate(R.layout.video_player, videoFrame, false) as PlayerView
+        playerView.player = player
+        videoFrame.addView(playerView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // The OpenGL surface is used only for 180/360 projection modes.
         vrSurface = VrVideoSurfaceView(this).apply {
             surfaceEvents = this@MainActivity
+            visibility = View.GONE
         }
         videoFrame.addView(vrSurface, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
@@ -309,6 +320,20 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
         currentProjection = projection
         vrSurface.setProjection(projection)
         vrSurface.resetView()
+
+        if (projection == VrVideoSurfaceView.Projection.FLAT) {
+            // Detach the GL surface before handing video output back to Media3.
+            attachedSurface?.let { player.clearVideoSurface(it) }
+            vrSurface.visibility = View.GONE
+            playerView.visibility = View.VISIBLE
+            playerView.player = player
+        } else {
+            // Release Media3's flat output before attaching the GL Surface.
+            playerView.player = null
+            playerView.visibility = View.GONE
+            vrSurface.visibility = View.VISIBLE
+            attachedSurface?.let { player.setVideoSurface(it) }
+        }
         modeBadge.text = when (projection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
             VrVideoSurfaceView.Projection.VR180 -> "180° VIEW"
@@ -383,6 +408,8 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
                 it.release()
             }
             attachedSurface = surface
+        }
+        if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
             player.setVideoSurface(surface)
         }
     }
@@ -408,6 +435,7 @@ class MainActivity : Activity(), VrVideoSurfaceView.SurfaceEvents {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(progressUpdater)
+        if (::playerView.isInitialized) playerView.player = null
         if (attachedSurface != null) {
             player.clearVideoSurface(attachedSurface!!)
             attachedSurface?.release()
