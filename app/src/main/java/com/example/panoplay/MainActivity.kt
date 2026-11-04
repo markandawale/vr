@@ -103,6 +103,8 @@ class MainActivity : Activity() {
     private var activeVideoDecoder = "unknown"
     private var activeVideoSize = "size unknown"
     private var av1HardwareDecoders = "checking"
+    private var avcHardwareDecoders = "checking"
+    private var hevcHardwareDecoders = "checking"
     private var fullscreenControlsVisible = true
     private var normalRootPadding = intArrayOf(0, 0, 0, 0)
     private var normalVideoMargins = intArrayOf(0, 0)
@@ -152,14 +154,17 @@ class MainActivity : Activity() {
         val renderersFactory = DefaultRenderersFactory(this)
             .setMediaCodecSelector(codecSelector)
         player = ExoPlayer.Builder(this, renderersFactory).build()
-        av1HardwareDecoders = try {
-            MediaCodecSelector.DEFAULT.getDecoderInfos(MimeTypes.VIDEO_AV1, false, false)
+        fun hardwareDecoderNames(mimeType: String): String = try {
+            MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, false, false)
                 .filter { it.hardwareAccelerated }
                 .joinToString { it.name }
                 .ifBlank { "none" }
         } catch (error: Exception) {
             "query failed"
         }
+        avcHardwareDecoders = hardwareDecoderNames(MimeTypes.VIDEO_H264)
+        hevcHardwareDecoders = hardwareDecoderNames(MimeTypes.VIDEO_H265)
+        av1HardwareDecoders = hardwareDecoderNames(MimeTypes.VIDEO_AV1)
         player.addAnalyticsListener(object : AnalyticsListener {
             override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
                 if (isFullscreen) fullscreenDroppedFrames += droppedFrames else normalDroppedFrames += droppedFrames
@@ -647,7 +652,7 @@ class MainActivity : Activity() {
             VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "LEFT"
             VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "RIGHT"
         }
-        modeBadge.text = "$projectionLabel $eyeLabel · $activeVideoSize · N:$normalDroppedFrames F:$fullscreenDroppedFrames · $activeVideoDecoder · AV1 HW:$av1HardwareDecoders"
+        modeBadge.text = "$projectionLabel $eyeLabel · $activeVideoSize · N:$normalDroppedFrames F:$fullscreenDroppedFrames · $activeVideoDecoder · HW AVC:$avcHardwareDecoders HEVC:$hevcHardwareDecoders AV1:$av1HardwareDecoders"
     }
 
     private fun updateSphericalSurfaceBufferSize() {
