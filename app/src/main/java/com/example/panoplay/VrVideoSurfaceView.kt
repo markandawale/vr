@@ -218,7 +218,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             GLES20.glUniform1i(samplerHandle, 0)
             GLES20.glUniformMatrix4fv(textureMatrixHandle, 1, false, textureMatrix, 0)
 
-            if (projection == Projection.FLAT) {
+            if (projection == Projection.FLAT || DEBUG_RAW_VIDEO_OUTPUT) {
                 Matrix.setIdentityM(mvpMatrix, 0)
                 val surfaceAspect = width.toFloat() / height.toFloat()
                 val sx: Float
@@ -433,6 +433,8 @@ class VrVideoSurfaceView @JvmOverloads constructor(
     }
 
     companion object {
+        // Diagnostic isolation: bypass sphere mesh while retaining LibVLC-to-GL texture input.
+        private const val DEBUG_RAW_VIDEO_OUTPUT = true
         private const val VERTEX_SHADER = """
             uniform mat4 uMvpMatrix;
             uniform mat4 uTexMatrix;
