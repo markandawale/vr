@@ -79,6 +79,7 @@ class MainActivity : Activity() {
     private var mpvDescriptor: ParcelFileDescriptor? = null
     private var pendingMpvPath: String? = null
     private var mpvLoadedUri: String? = null
+    private var currentUri: Uri? = null
     private var mpvYaw = 0.0
     private var mpvPitch = 0.0
     private lateinit var videoFrame: FrameLayout
@@ -585,6 +586,11 @@ class MainActivity : Activity() {
             playerView.visibility = View.VISIBLE
             PlayerView.switchTargetView(player, sphericalPlayerView, playerView)
             sphericalPlayerView.visibility = View.GONE
+            currentUri?.let { uri ->
+                player.setMediaItem(MediaItem.fromUri(uri))
+                player.prepare()
+                player.playWhenReady = true
+            }
         } else {
             player.pause()
             playerView.visibility = View.GONE
@@ -633,7 +639,8 @@ class MainActivity : Activity() {
         val engine = mpv ?: return
         val projectionName = if (currentProjection == VrVideoSurfaceView.Projection.VR180) "half_equirectangular" else "equirectangular"
         val eyeName = when (stereoLayout) {
-            VrVideoSurfaceView.StereoLayout.MONO, VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "left"
+            VrVideoSurfaceView.StereoLayout.MONO -> "mono"
+            VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "left"
             VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "right"
         }
         val params = "yaw=${mpvYaw},pitch=${mpvPitch},fov=1.745329252,source_projection=${projectionName},eye=${eyeName}"
@@ -711,6 +718,7 @@ class MainActivity : Activity() {
         // Every newly opened video starts in the requested default viewing mode.
         stereoLayout = VrVideoSurfaceView.StereoLayout.SBS_LEFT
         updateModeChips()
+        currentUri = uri
         setProjection(VrVideoSurfaceView.Projection.VR180)
         titleView.text = currentVideoName
         placeholder.visibility = View.VISIBLE
