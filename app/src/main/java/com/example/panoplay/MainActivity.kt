@@ -829,11 +829,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun toggleOrientation() {
-        isLandscape = !isLandscape
-        requestedOrientation = if (isLandscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        rotateButton.text = if (isLandscape) "PORTRAIT" else "ROTATE"
-    }
 
     @Deprecated("Use OnBackInvokedDispatcher on newer Android versions")
     override fun onBackPressed() {
