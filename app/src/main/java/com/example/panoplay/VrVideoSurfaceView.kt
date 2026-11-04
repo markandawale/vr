@@ -319,9 +319,18 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                     -1f, -1f, 0f,  1f, -1f, 0f, -1f, 1f, 0f,
                     -1f, 1f, 0f,   1f, -1f, 0f,  1f, 1f, 0f
                 )
+                val u0 = when (stereoLayout) {
+                    StereoLayout.MONO, StereoLayout.SBS_LEFT -> 0f
+                    StereoLayout.SBS_RIGHT -> 0.5f
+                }
+                val u1 = when (stereoLayout) {
+                    StereoLayout.MONO -> 1f
+                    StereoLayout.SBS_LEFT -> 0.5f
+                    StereoLayout.SBS_RIGHT -> 1f
+                }
                 val tex = floatArrayOf(
-                    0f, 1f,  1f, 1f,  0f, 0f,
-                    0f, 0f,  1f, 1f,  1f, 0f
+                    u0, 1f,  u1, 1f,  u0, 0f,
+                    u0, 0f,  u1, 1f,  u1, 0f
                 )
                 setBuffers(positions, tex)
                 return
