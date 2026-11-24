@@ -32,11 +32,6 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.tan
 
-/**
- * Pro-grade VSync & Presentation-Timestamp locked VR180/VR360 renderer.
- * Uses EGL14 + Choreographer + EGLExt.eglPresentationTimeANDROID + Surface.setFrameRate
- * to match native 2D Hardware Composer smoothness on 60fps/59.94fps fast-motion videos.
- */
 class VrVideoSurfaceView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
@@ -73,21 +68,24 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
     init {
         holder.addCallback(this)
-        setBackgroundColor(0xFF050608.toInt())
         isClickable = true
     }
 
-    private fun startGlThread() {
-        if (glThread != null) return
-        val thread = HandlerThread("PanoPlay-GL-VSync", android.os.Process.THREAD_PRIORITY_DISPLAY).apply {
-            start()
+    private fun ensureGlThread(): Handler {
+        var handler = glHandler
+        if (handler == null || glThread?.isAlive != true) {
+            val thread = HandlerThread("PanoPlay-GL-VSync", android.os.Process.THREAD_PRIORITY_DISPLAY).apply {
+                start()
+            }
+            glThread = thread
+            handler = Handler(thread.looper)
+            glHandler = handler
         }
-        glThread = thread
-        glHandler = Handler(thread.looper)
+        return handler
     }
 
     private fun postGl(block: () -> Unit) {
-        glHandler?.post(block)
+        ensureGlThread().post(block)
     }
 
     fun getVideoSurface(): Surface? = renderEngine.getDecoderSurface()
@@ -110,11 +108,9 @@ class VrVideoSurfaceView @JvmOverloads constructor(
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        startGlThread()
         val displaySurface = holder.surface
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
-                // Lock display refresh cadence to 60Hz / 120Hz integer multiple to stop 59.94/60fps judder
                 displaySurface.setFrameRate(
                     60f,
                     Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
@@ -226,8 +222,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         private val mvpMatrix = FloatArray(16)
         private val textureMatrix = FloatArray(16)
 
-        private var lastVideoTimestampNs = 0L
-        private var lastSwapTimestampNs = 0L
+        private var firstFrameDrawn = false
 
         fun getDecoderSurface(): Surface? = decoderSurface
 
@@ -271,7 +266,6 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, eglConfig, displaySurface, surfaceAttribs, 0)
 
             EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
-            // Swap interval 1 locks buffer queue strictly to hardware VSync
             EGL14.eglSwapInterval(eglDisplay, 1)
 
             setupGlPipeline()
@@ -286,9 +280,9 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
             hasNewVideoFrame.set(false)
+            firstFrameDrawn = false
             val handler = glHandler ?: mainHandler
             val st = SurfaceTexture(oesTextureId).apply {
-                // Deliver frame notifications directly to the high-priority GL HandlerThread
                 setOnFrameAvailableListener(this@EglRenderEngine, handler)
                 if (videoWidth > 0 && videoHeight > 0) {
                     setDefaultBufferSize(videoWidth, videoHeight)
@@ -302,7 +296,10 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             rebuildMesh()
 
             isRunning = true
-            mainHandler.post { surfaceEvents?.onVideoSurfaceAvailable(decSurf) }
+            // Notify MainActivity on Main Thread so ExoPlayer binds this Surface immediately
+            mainHandler.post {
+                surfaceEvents?.onVideoSurfaceAvailable(decSurf)
+            }
 
             Choreographer.getInstance().removeFrameCallback(this)
             Choreographer.getInstance().postFrameCallback(this)
@@ -314,6 +311,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             if (eglDisplay != EGL14.EGL_NO_DISPLAY && eglSurface != EGL14.EGL_NO_SURFACE) {
                 EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
                 GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
+                firstFrameDrawn = false
             }
         }
 
@@ -333,31 +331,27 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 try {
                     st.updateTexImage()
                     st.getTransformMatrix(textureMatrix)
-                    lastVideoTimestampNs = st.timestamp
                     updatedFrame = true
+                    firstFrameDrawn = true
                 } catch (_: RuntimeException) {
                 }
             }
 
-            // Check if camera moved (drag/damping) even when video frame hasn't changed
             val cameraMoving = kotlin.math.abs(targetYaw - currentYaw) > 0.01f ||
                 kotlin.math.abs(targetPitch - currentPitch) > 0.01f
 
-            // Skip redundant swapBuffers if neither a new decoded video frame arrived nor camera panned.
-            // This prevents SurfaceFlinger buffer queue saturation and eliminates 60fps-on-90/120Hz judder!
-            if (!updatedFrame && !cameraMoving && (frameTimeNanos - lastSwapTimestampNs) < 32_000_000L) {
+            // Draw on every new decoded video frame, camera pan, or initial surface clear
+            if (!updatedFrame && !cameraMoving && firstFrameDrawn) {
                 return
             }
 
             drawScene()
 
-            // Attach exact presentation time to SurfaceFlinger so fast-motion frames never jitter
             try {
                 EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, frameTimeNanos)
             } catch (_: Throwable) {
             }
             EGL14.eglSwapBuffers(eglDisplay, eglSurface)
-            lastSwapTimestampNs = frameTimeNanos
         }
 
         private fun drawScene() {
@@ -382,8 +376,8 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 }
                 Matrix.scaleM(mvpMatrix, 0, sx, sy, 1f)
             } else {
-                currentYaw += (targetYaw - currentYaw) * 0.42f
-                currentPitch += (targetPitch - currentPitch) * 0.42f
+                currentYaw += (targetYaw - currentYaw) * 0.45f
+                currentPitch += (targetPitch - currentPitch) * 0.45f
 
                 val aspect = viewportWidth.toFloat() / viewportHeight.toFloat()
                 Matrix.perspectiveM(projectionMatrix, 0, fieldOfView, aspect, 0.05f, 50f)
@@ -456,12 +450,14 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             currentYaw = 0f
             currentPitch = 0f
             fieldOfView = 80f
+            firstFrameDrawn = false
             rebuildMesh()
         }
 
         fun setStereoLayout(next: StereoLayout) {
             if (stereoLayout == next && texBuffer != null) return
             stereoLayout = next
+            firstFrameDrawn = false
             rebuildMesh()
         }
 
@@ -491,6 +487,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             if (projection != Projection.FLAT) {
                 fieldOfView = (fieldOfView / scaleFactor).coerceIn(45f, 100f)
                 clamp180Bounds()
+                firstFrameDrawn = false
             }
         }
 
@@ -511,6 +508,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             currentYaw = 0f
             currentPitch = 0f
             fieldOfView = 80f
+            firstFrameDrawn = false
         }
 
         private fun setupGlPipeline() {

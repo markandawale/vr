@@ -74,6 +74,7 @@ class MainActivity : Activity() {
     private lateinit var playerView: PlayerView
     private lateinit var vrSurfaceView: VrVideoSurfaceView
     private var vrOutputSurface: Surface? = null
+    private var pendingMediaUri: Uri? = null
 
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
@@ -133,12 +134,12 @@ class MainActivity : Activity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        // Hardware MediaCodec priority with automatic decoder fallback for 1080p AVC & 1440p 60fps AV1
+        // Force pure Hardware MediaCodec (like Ellipse VR) — prevent slow CPU software decoder fallback
         val renderersFactory = DefaultRenderersFactory(this)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
             .setEnableDecoderFallback(true)
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(15_000, 50_000, 1_500, 3_000)
+            .setBufferDurationsMs(15_000, 50_000, 1_000, 2_500)
             .build()
 
         player = ExoPlayer.Builder(this, renderersFactory)
@@ -224,7 +225,6 @@ class MainActivity : Activity() {
             clipToOutline = false
         }
 
-        // 1. Flat 2D hardware overlay PlayerView
         playerView = LayoutInflater.from(this).inflate(R.layout.video_player, videoFrame, false) as PlayerView
         playerView.player = player
         playerView.visibility = View.GONE
@@ -233,7 +233,6 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
 
-        // 2. Custom VSync-locked OpenGL VR180 / VR360 SurfaceView
         vrSurfaceView = VrVideoSurfaceView(this).apply {
             setProjection(currentProjection)
             setStereoLayout(stereoLayout)
@@ -242,6 +241,10 @@ class MainActivity : Activity() {
                     vrOutputSurface = surface
                     if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
                         player.setVideoSurface(surface)
+                        pendingMediaUri?.let { uri ->
+                            pendingMediaUri = null
+                            startPlayback(uri)
+                        }
                     }
                 }
 
@@ -655,8 +658,14 @@ class MainActivity : Activity() {
         val activeSurface = vrOutputSurface ?: vrSurfaceView.getVideoSurface()
         if (activeSurface != null && activeSurface.isValid) {
             player.setVideoSurface(activeSurface)
+            startPlayback(uri)
+        } else {
+            // Wait until EGL14 SurfaceTexture is created in onVideoSurfaceAvailable
+            pendingMediaUri = uri
         }
+    }
 
+    private fun startPlayback(uri: Uri) {
         player.setMediaItem(MediaItem.fromUri(uri))
         player.prepare()
         player.playWhenReady = true
