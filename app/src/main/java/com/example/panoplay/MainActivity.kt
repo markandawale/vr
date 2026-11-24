@@ -1,6 +1,7 @@
 package com.example.panoplay
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -26,6 +27,7 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.media3.common.C
@@ -160,6 +162,7 @@ class MainActivity : Activity() {
     private var currentBrightness = -1f
     private var lastRenderedFrames = 0
     private var lastFpsCheckTimeMs = 0L
+    private var showFpsEnabled = true
 
     private var isScrubbing = false
     private var currentProjection = VrVideoSurfaceView.Projection.VR180
@@ -189,14 +192,16 @@ class MainActivity : Activity() {
                     fullscreenCurrentTime.text = formatTime(position)
                     fullscreenDuration.text = formatTime(duration)
                 }
-                updateLiveFpsBadge()
+                if (showFpsEnabled) {
+                    updateLiveFpsBadge()
+                }
             }
             mainHandler.postDelayed(this, 500L)
         }
     }
 
     private fun updateLiveFpsBadge() {
-        if (!::fpsBadge.isInitialized) return
+        if (!::fpsBadge.isInitialized || !showFpsEnabled) return
         val now = android.os.SystemClock.uptimeMillis()
         var liveFps = if (currentProjection != VrVideoSurfaceView.Projection.FLAT && ::vrSurfaceView.isInitialized) {
             vrSurfaceView.getMeasuredVideoFps()
@@ -204,7 +209,6 @@ class MainActivity : Activity() {
             0
         }
 
-        // Fallback to ExoPlayer decoder counter (works in FLAT 2D and initial startup)
         val counters = player.videoDecoderCounters
         if (counters != null) {
             counters.ensureUpdated()
@@ -236,8 +240,21 @@ class MainActivity : Activity() {
         fpsBadge.text = if (player.isPlaying && liveFps > 0) "$liveFps FPS" else "-- FPS"
     }
 
+    private fun applyFpsVisibility() {
+        if (!::fpsBadge.isInitialized) return
+        if (!showFpsEnabled) {
+            fpsBadge.visibility = View.GONE
+        } else {
+            fpsBadge.visibility = if (isFullscreen && !fullscreenControlsVisible) View.INVISIBLE else View.VISIBLE
+            updateLiveFpsBadge()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        showFpsEnabled = prefs.getBoolean(KEY_SHOW_FPS, true)
+
         window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.statusBarColor = Color.rgb(9, 10, 13)
@@ -332,6 +349,69 @@ class MainActivity : Activity() {
         brightnessHud.visibility = View.VISIBLE
     }
 
+    private fun openSettingsDialog() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(18), dp(22), dp(14))
+            background = rounded(Color.rgb(20, 23, 29), 18)
+        }
+
+        val dialogTitle = text("PLAYER SETTINGS", 14f, Color.WHITE, true).apply {
+            letterSpacing = 0.06f
+            setPadding(0, 0, 0, dp(16))
+        }
+        container.addView(dialogTitle)
+
+        // Row 1: Show Live FPS Toggle
+        val fpsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = rounded(Color.rgb(28, 31, 38), 14)
+        }
+        val fpsTextCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val fpsLabel = text("Show Live FPS", 13f, Color.WHITE, true)
+        val fpsSub = text("Display real-time frame rate on top-right", 10f, Color.rgb(152, 158, 170), false).apply {
+            setPadding(0, dp(3), 0, 0)
+        }
+        fpsTextCol.addView(fpsLabel)
+        fpsTextCol.addView(fpsSub)
+        fpsRow.addView(fpsTextCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        val fpsSwitch = Switch(this).apply {
+            isChecked = showFpsEnabled
+            setOnCheckedChangeListener { _, isChecked ->
+                showFpsEnabled = isChecked
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(KEY_SHOW_FPS, isChecked)
+                    .apply()
+                applyFpsVisibility()
+            }
+        }
+        fpsRow.addView(fpsSwitch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        container.addView(fpsRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(container)
+            .create()
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+
+        val closeBtn = pillButton("DONE", true).apply {
+            setOnClickListener { dialog.dismiss() }
+        }
+        container.addView(
+            closeBtn,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)).apply {
+                topMargin = dp(18)
+            }
+        )
+
+        dialog.show()
+    }
+
     private fun buildInterface() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -356,6 +436,22 @@ class MainActivity : Activity() {
         brandColumn.addView(brand)
         brandColumn.addView(subtitle)
         header.addView(brandColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        val settingsButton = text("⚙", 17f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            background = rounded(Color.rgb(31, 34, 41), 30)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Settings"
+            setOnClickListener { openSettingsDialog() }
+        }
+        header.addView(
+            settingsButton,
+            LinearLayout.LayoutParams(dp(42), dp(42)).apply {
+                rightMargin = dp(8)
+            }
+        )
+
         val openButton = pillButton("＋  OPEN VIDEO", true).apply {
             setOnClickListener { chooseVideo() }
         }
@@ -412,11 +508,13 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
 
+        // Translucent Google Files style Brightness HUD Pill
         brightnessHud = text("☀  50%", 14f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(18), dp(10), dp(18), dp(10))
-            background = rounded(Color.argb(210, 15, 17, 22), 24)
-            elevation = dp(8).toFloat()
+            background = rounded(Color.argb(115, 15, 17, 22), 24)
+            alpha = 0.85f
+            elevation = dp(4).toFloat()
             visibility = View.GONE
         }
         videoFrame.addView(
@@ -443,11 +541,11 @@ class MainActivity : Activity() {
         videoFrame.addView(viewBadge, badgeParams)
         modeBadge = viewBadge
 
-        // Live FPS badge directly opposite modeBadge on the top-right corner
         fpsBadge = text("-- FPS", 10f, Color.rgb(120, 235, 165), true).apply {
             setPadding(dp(12), dp(7), dp(12), dp(7))
             background = rounded(Color.argb(190, 15, 17, 22), 30)
             elevation = dp(4).toFloat()
+            visibility = if (showFpsEnabled) View.VISIBLE else View.GONE
         }
         val fpsBadgeParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -921,7 +1019,7 @@ class MainActivity : Activity() {
             fullscreenControls.visibility = View.GONE
             fullscreenButton.visibility = View.VISIBLE
             modeBadge.visibility = View.VISIBLE
-            fpsBadge.visibility = View.VISIBLE
+            applyFpsVisibility()
         }
     }
 
@@ -930,7 +1028,11 @@ class MainActivity : Activity() {
         val visibility = if (visible) View.VISIBLE else View.INVISIBLE
         fullscreenControls.visibility = visibility
         modeBadge.visibility = visibility
-        fpsBadge.visibility = visibility
+        if (showFpsEnabled) {
+            fpsBadge.visibility = visibility
+        } else {
+            fpsBadge.visibility = View.GONE
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -1036,5 +1138,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_VIDEO = 4102
+        private const val PREFS_NAME = "panoplay_settings"
+        private const val KEY_SHOW_FPS = "show_live_fps"
     }
 }
