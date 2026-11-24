@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.GestureDetector
@@ -67,19 +68,15 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
 
     private var startX = 0f
     private var startY = 0f
+    private var downTimeMs = 0L
+    private var movedBeyondSlop = false
+    private var multiTouchOccurred = false
     private var isBrightnessGesture = false
     private var startBrightness = 0.5f
 
     private val gestureDetector = GestureDetector(
         context,
         object : GestureDetector.SimpleOnGestureListener() {
-            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                if (shouldIgnoreTap?.invoke(e.x, e.y) != true) {
-                    onVideoSingleTap?.invoke()
-                }
-                return true
-            }
-
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 if (shouldIgnoreTap?.invoke(e.x, e.y) != true) {
                     onVideoDoubleTap?.invoke(e.x, e.y)
@@ -91,7 +88,8 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         val slop = 14f * resources.displayMetrics.density
-        if (shouldIgnoreTap?.invoke(event.x, event.y) != true) {
+        val ignoredAtPoint = shouldIgnoreTap?.invoke(event.x, event.y) == true
+        if (!ignoredAtPoint) {
             gestureDetector.onTouchEvent(event)
         }
 
@@ -99,11 +97,22 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
             MotionEvent.ACTION_DOWN -> {
                 startX = event.x
                 startY = event.y
+                downTimeMs = SystemClock.uptimeMillis()
+                movedBeyondSlop = false
+                multiTouchOccurred = false
                 isBrightnessGesture = false
                 return super.dispatchTouchEvent(event)
             }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                multiTouchOccurred = true
+                if (isBrightnessGesture) {
+                    isBrightnessGesture = false
+                    onBrightnessSwipeEnd?.invoke()
+                }
+                return super.dispatchTouchEvent(event)
+            }
             MotionEvent.ACTION_MOVE -> {
-                if (event.pointerCount > 1) {
+                if (event.pointerCount > 1 || multiTouchOccurred) {
                     if (isBrightnessGesture) {
                         isBrightnessGesture = false
                         onBrightnessSwipeEnd?.invoke()
@@ -112,6 +121,9 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
                 }
                 val dx = event.x - startX
                 val dy = event.y - startY
+                if (dx * dx + dy * dy > slop * slop) {
+                    movedBeyondSlop = true
+                }
 
                 if (!isBrightnessGesture &&
                     startX < width * 0.28f &&
@@ -136,7 +148,26 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
                 }
                 return super.dispatchTouchEvent(event)
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+            MotionEvent.ACTION_UP -> {
+                if (isBrightnessGesture) {
+                    isBrightnessGesture = false
+                    onBrightnessSwipeEnd?.invoke()
+                    return true
+                }
+                val handled = super.dispatchTouchEvent(event)
+                val elapsed = SystemClock.uptimeMillis() - downTimeMs
+                if (!movedBeyondSlop &&
+                    !multiTouchOccurred &&
+                    elapsed < 320L &&
+                    shouldIgnoreTap?.invoke(startX, startY) != true &&
+                    shouldIgnoreTap?.invoke(event.x, event.y) != true
+                ) {
+                    onVideoSingleTap?.invoke()
+                }
+                return handled
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                downTimeMs = 0L
                 if (isBrightnessGesture) {
                     isBrightnessGesture = false
                     onBrightnessSwipeEnd?.invoke()
@@ -280,7 +311,7 @@ class MainActivity : Activity() {
 
     private fun updateLiveFpsBadge() {
         if (!::fpsBadge.isInitialized || !showFpsEnabled) return
-        val now = android.os.SystemClock.uptimeMillis()
+        val now = SystemClock.uptimeMillis()
         var liveFps = if (currentProjection != VrVideoSurfaceView.Projection.FLAT && ::vrSurfaceView.isInitialized) {
             vrSurfaceView.getMeasuredVideoFps()
         } else {
@@ -323,7 +354,7 @@ class MainActivity : Activity() {
         if (!showFpsEnabled) {
             fpsBadge.visibility = View.GONE
         } else {
-            fpsBadge.visibility = if (isFullscreen && !fullscreenControlsVisible) View.INVISIBLE else View.VISIBLE
+            fpsBadge.visibility = if (isFullscreen && !fullscreenControlsVisible) View.GONE else View.VISIBLE
             updateLiveFpsBadge()
         }
     }
@@ -333,7 +364,7 @@ class MainActivity : Activity() {
         if (!showModeBadgeEnabled) {
             modeBadge.visibility = View.GONE
         } else {
-            modeBadge.visibility = if (isFullscreen && !fullscreenControlsVisible) View.INVISIBLE else View.VISIBLE
+            modeBadge.visibility = if (isFullscreen && !fullscreenControlsVisible) View.GONE else View.VISIBLE
         }
     }
 
@@ -1011,7 +1042,6 @@ class MainActivity : Activity() {
         brandColumn.addView(subtitle)
         header.addView(brandColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
-        // Separate Video Metadata Inspector button
         val metadataButton = text("ℹ", 16f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             background = rounded(Color.rgb(31, 34, 41), 30)
@@ -1661,7 +1691,7 @@ class MainActivity : Activity() {
 
     private fun setFullscreenControlsVisible(visible: Boolean) {
         fullscreenControlsVisible = visible
-        val visibility = if (visible) View.VISIBLE else View.INVISIBLE
+        val visibility = if (visible) View.VISIBLE else View.GONE
         fullscreenControls.visibility = visibility
         if (showModeBadgeEnabled) {
             modeBadge.visibility = visibility
