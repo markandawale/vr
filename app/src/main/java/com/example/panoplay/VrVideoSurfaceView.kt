@@ -478,7 +478,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         fun drag(dx: Float, dy: Float, viewWidth: Int) {
             if (projection == Projection.FLAT) return
             val sensitivity = 165f / viewWidth.coerceAtLeast(1)
-            targetYaw += dx * sensitivity
+            targetYaw -= dx * sensitivity
             targetPitch = (targetPitch - dy * sensitivity).coerceIn(-82f, 82f)
             clamp180Bounds()
         }
