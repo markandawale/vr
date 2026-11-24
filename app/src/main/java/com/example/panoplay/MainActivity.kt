@@ -32,6 +32,7 @@ import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
@@ -283,12 +284,20 @@ class MainActivity : Activity() {
         val renderersFactory = DefaultRenderersFactory(this)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
             .setEnableDecoderFallback(true)
+
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(15_000, 50_000, 1_000, 2_500)
+            .setBufferDurationsMs(10_000, 30_000, 1_000, 2_000)
+            .build()
+
+        // Enables Android Bluetooth/TWS A2DP hardware lip-sync compensation
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
         player = ExoPlayer.Builder(this, renderersFactory)
             .setLoadControl(loadControl)
+            .setAudioAttributes(audioAttributes, true)
             .build()
 
         buildInterface()
@@ -580,7 +589,6 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
 
-        // Translucent HUD for Brightness, Speed, Rotation & Seek feedback
         centerHud = text("☀  50%", 14f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(18), dp(10), dp(18), dp(10))
