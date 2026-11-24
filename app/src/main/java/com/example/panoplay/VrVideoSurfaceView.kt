@@ -2,22 +2,30 @@ package com.example.panoplay
 
 import android.content.Context
 import android.graphics.SurfaceTexture
+import android.opengl.EGL14
+import android.opengl.EGLConfig
+import android.opengl.EGLContext
+import android.opengl.EGLDisplay
+import android.opengl.EGLExt
+import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
-import android.opengl.GLSurfaceView
 import android.opengl.Matrix
+import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.util.AttributeSet
+import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
-import javax.microedition.khronos.egl.EGLConfig
-import javax.microedition.khronos.opengles.GL10
 import kotlin.math.PI
 import kotlin.math.atan
 import kotlin.math.cos
@@ -25,13 +33,14 @@ import kotlin.math.sin
 import kotlin.math.tan
 
 /**
- * High-framerate, VSync-locked monoscopic viewer for Flat, 180° and 360° VR videos.
- * Uses continuous VSync rendering with main-looper frame gating to eliminate black screens and fast-motion judder.
+ * Pro-grade VSync & Presentation-Timestamp locked VR180/VR360 renderer.
+ * Uses EGL14 + Choreographer + EGLExt.eglPresentationTimeANDROID + Surface.setFrameRate
+ * to match native 2D Hardware Composer smoothness on 60fps/59.94fps fast-motion videos.
  */
 class VrVideoSurfaceView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
-) : GLSurfaceView(context, attrs), GLSurfaceView.Renderer {
+) : SurfaceView(context, attrs), SurfaceHolder.Callback {
 
     enum class Projection { FLAT, VR180, VR360 }
     enum class StereoLayout { MONO, SBS_LEFT, SBS_RIGHT }
@@ -43,7 +52,11 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
     var surfaceEvents: SurfaceEvents? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val renderer = VideoRenderer()
+
+    private var glThread: HandlerThread? = null
+    private var glHandler: Handler? = null
+    private val renderEngine = EglRenderEngine()
+
     private var previousX = 0f
     private var previousY = 0f
 
@@ -52,51 +65,79 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 val factor = detector.scaleFactor
-                queueEvent { renderer.zoom(factor) }
+                postGl { renderEngine.zoom(factor) }
                 return true
             }
         }
     )
 
     init {
-        setEGLContextClientVersion(2)
-        setEGLConfigChooser(8, 8, 8, 8, 0, 0)
-        setPreserveEGLContextOnPause(true)
-        setRenderer(this)
-        renderMode = RENDERMODE_CONTINUOUSLY
+        holder.addCallback(this)
         setBackgroundColor(0xFF050608.toInt())
         isClickable = true
     }
 
-    fun getVideoSurface(): Surface? = renderer.getOutputSurface()
+    private fun startGlThread() {
+        if (glThread != null) return
+        val thread = HandlerThread("PanoPlay-GL-VSync", android.os.Process.THREAD_PRIORITY_DISPLAY).apply {
+            start()
+        }
+        glThread = thread
+        glHandler = Handler(thread.looper)
+    }
+
+    private fun postGl(block: () -> Unit) {
+        glHandler?.post(block)
+    }
+
+    fun getVideoSurface(): Surface? = renderEngine.getDecoderSurface()
 
     fun setProjection(projection: Projection) {
-        queueEvent { renderer.setProjection(projection) }
+        postGl { renderEngine.setProjection(projection) }
     }
 
     fun setStereoLayout(layout: StereoLayout) {
-        queueEvent { renderer.setStereoLayout(layout) }
+        postGl { renderEngine.setStereoLayout(layout) }
     }
 
     fun setVideoSize(width: Int, height: Int, rotationDegrees: Int = 0, pixelRatio: Float = 1f) {
         if (width <= 0 || height <= 0) return
-        queueEvent { renderer.setVideoSize(width, height, rotationDegrees, pixelRatio) }
+        postGl { renderEngine.setVideoSize(width, height, rotationDegrees, pixelRatio) }
     }
 
     fun resetView() {
-        queueEvent { renderer.resetView() }
+        postGl { renderEngine.resetView() }
     }
 
-    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        renderer.onSurfaceCreated()
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        startGlThread()
+        val displaySurface = holder.surface
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                // Lock display refresh cadence to 60Hz / 120Hz integer multiple to stop 59.94/60fps judder
+                displaySurface.setFrameRate(
+                    60f,
+                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                    Surface.CHANGE_FRAME_RATE_ALWAYS
+                )
+            } catch (_: Throwable) {
+            }
+        }
+        postGl {
+            renderEngine.initEglAndSurface(displaySurface)
+        }
     }
 
-    override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-        renderer.onSurfaceChanged(width, height)
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        postGl {
+            renderEngine.onViewportChanged(width, height)
+        }
     }
 
-    override fun onDrawFrame(gl: GL10?) {
-        renderer.onDrawFrame()
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
+        postGl {
+            renderEngine.destroyEglAndSurface()
+        }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -112,7 +153,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                     val dx = event.x - previousX
                     val dy = event.y - previousY
                     val viewW = width.coerceAtLeast(1)
-                    queueEvent { renderer.drag(dx, dy, viewW) }
+                    postGl { renderEngine.drag(dx, dy, viewW) }
                 }
                 previousX = event.x
                 previousY = event.y
@@ -123,15 +164,36 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         return true
     }
 
-    fun release() {
-        queueEvent { renderer.release() }
+    fun onResume() {
+        postGl { renderEngine.setActive(true) }
     }
 
-    private inner class VideoRenderer : SurfaceTexture.OnFrameAvailableListener {
+    fun onPause() {
+        postGl { renderEngine.setActive(false) }
+    }
+
+    fun release() {
+        postGl {
+            renderEngine.destroyEglAndSurface()
+        }
+        glThread?.quitSafely()
+        glThread = null
+        glHandler = null
+    }
+
+    private inner class EglRenderEngine : Choreographer.FrameCallback, SurfaceTexture.OnFrameAvailableListener {
+        private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
+        private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
+        private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
+        private var eglConfig: EGLConfig? = null
+
         private var oesTextureId = 0
-        @Volatile private var surfaceTexture: SurfaceTexture? = null
-        @Volatile private var outputSurface: Surface? = null
-        private val frameAvailable = AtomicBoolean(false)
+        @Volatile private var decoderSurfaceTexture: SurfaceTexture? = null
+        @Volatile private var decoderSurface: Surface? = null
+
+        private val hasNewVideoFrame = AtomicBoolean(false)
+        private var isRunning = false
+        private var isActive = true
 
         private var program = 0
         private var positionHandle = 0
@@ -140,11 +202,12 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         private var textureMatrixHandle = 0
         private var samplerHandle = 0
 
-        private var width = 1
-        private var height = 1
+        private var viewportWidth = 1
+        private var viewportHeight = 1
         private var videoAspect = 16f / 9f
         private var videoWidth = 0
         private var videoHeight = 0
+
         private var projection = Projection.VR180
         private var stereoLayout = StereoLayout.SBS_LEFT
 
@@ -163,20 +226,55 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         private val mvpMatrix = FloatArray(16)
         private val textureMatrix = FloatArray(16)
 
-        fun getOutputSurface(): Surface? = outputSurface
+        private var lastVideoTimestampNs = 0L
+        private var lastSwapTimestampNs = 0L
 
-        fun onSurfaceCreated() {
-            GLES20.glClearColor(0.015f, 0.018f, 0.024f, 1f)
-            GLES20.glDisable(GLES20.GL_CULL_FACE)
-            GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-            GLES20.glDisable(GLES20.GL_DITHER)
+        fun getDecoderSurface(): Surface? = decoderSurface
 
-            program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
-            positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
-            texCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
-            mvpHandle = GLES20.glGetUniformLocation(program, "uMvpMatrix")
-            textureMatrixHandle = GLES20.glGetUniformLocation(program, "uTexMatrix")
-            samplerHandle = GLES20.glGetUniformLocation(program, "sTexture")
+        fun setActive(active: Boolean) {
+            isActive = active
+            if (active && isRunning && eglSurface != EGL14.EGL_NO_SURFACE) {
+                Choreographer.getInstance().removeFrameCallback(this)
+                Choreographer.getInstance().postFrameCallback(this)
+            }
+        }
+
+        fun initEglAndSurface(displaySurface: Surface) {
+            destroyEglAndSurface()
+
+            eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+            val version = IntArray(2)
+            EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
+
+            val configAttribs = intArrayOf(
+                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_RED_SIZE, 8,
+                EGL14.EGL_GREEN_SIZE, 8,
+                EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8,
+                EGL14.EGL_DEPTH_SIZE, 0,
+                EGL14.EGL_STENCIL_SIZE, 0,
+                EGL14.EGL_NONE
+            )
+            val configs = arrayOfNulls<EGLConfig>(1)
+            val numConfigs = IntArray(1)
+            EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0)
+            eglConfig = configs[0]
+
+            val contextAttribs = intArrayOf(
+                EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
+                EGL14.EGL_NONE
+            )
+            eglContext = EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+
+            val surfaceAttribs = intArrayOf(EGL14.EGL_NONE)
+            eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, eglConfig, displaySurface, surfaceAttribs, 0)
+
+            EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+            // Swap interval 1 locks buffer queue strictly to hardware VSync
+            EGL14.eglSwapInterval(eglDisplay, 1)
+
+            setupGlPipeline()
 
             val textures = IntArray(1)
             GLES20.glGenTextures(1, textures, 0)
@@ -187,51 +285,82 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
-            val oldSurface = outputSurface
-            val oldTexture = surfaceTexture
-            if (oldSurface != null) {
-                mainHandler.post {
-                    surfaceEvents?.onVideoSurfaceDestroyed(oldSurface)
-                    oldSurface.release()
-                }
-            }
-            oldTexture?.release()
-
-            frameAvailable.set(false)
-            val newSt = SurfaceTexture(oesTextureId).apply {
-                // Explicitly pass mainHandler because GLThread has no Looper
-                setOnFrameAvailableListener(this@VideoRenderer, mainHandler)
+            hasNewVideoFrame.set(false)
+            val handler = glHandler ?: mainHandler
+            val st = SurfaceTexture(oesTextureId).apply {
+                // Deliver frame notifications directly to the high-priority GL HandlerThread
+                setOnFrameAvailableListener(this@EglRenderEngine, handler)
                 if (videoWidth > 0 && videoHeight > 0) {
                     setDefaultBufferSize(videoWidth, videoHeight)
                 }
             }
-            surfaceTexture = newSt
-            val newSurface = Surface(newSt)
-            outputSurface = newSurface
-            mainHandler.post { surfaceEvents?.onVideoSurfaceAvailable(newSurface) }
+            decoderSurfaceTexture = st
+            val decSurf = Surface(st)
+            decoderSurface = decSurf
 
             Matrix.setIdentityM(textureMatrix, 0)
             rebuildMesh()
+
+            isRunning = true
+            mainHandler.post { surfaceEvents?.onVideoSurfaceAvailable(decSurf) }
+
+            Choreographer.getInstance().removeFrameCallback(this)
+            Choreographer.getInstance().postFrameCallback(this)
         }
 
-        fun onSurfaceChanged(width: Int, height: Int) {
-            this.width = width.coerceAtLeast(1)
-            this.height = height.coerceAtLeast(1)
-            GLES20.glViewport(0, 0, this.width, this.height)
+        fun onViewportChanged(width: Int, height: Int) {
+            viewportWidth = width.coerceAtLeast(1)
+            viewportHeight = height.coerceAtLeast(1)
+            if (eglDisplay != EGL14.EGL_NO_DISPLAY && eglSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+                GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
+            }
         }
 
-        fun onDrawFrame() {
-            val st = surfaceTexture ?: return
+        override fun onFrameAvailable(surfaceTexture: SurfaceTexture?) {
+            hasNewVideoFrame.set(true)
+        }
 
-            if (frameAvailable.compareAndSet(true, false)) {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!isRunning || !isActive) return
+            Choreographer.getInstance().postFrameCallback(this)
+
+            if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE) return
+            val st = decoderSurfaceTexture ?: return
+
+            var updatedFrame = false
+            if (hasNewVideoFrame.compareAndSet(true, false)) {
                 try {
                     st.updateTexImage()
                     st.getTransformMatrix(textureMatrix)
+                    lastVideoTimestampNs = st.timestamp
+                    updatedFrame = true
                 } catch (_: RuntimeException) {
-                    // Surface recreated or producer disconnected
                 }
             }
 
+            // Check if camera moved (drag/damping) even when video frame hasn't changed
+            val cameraMoving = kotlin.math.abs(targetYaw - currentYaw) > 0.01f ||
+                kotlin.math.abs(targetPitch - currentPitch) > 0.01f
+
+            // Skip redundant swapBuffers if neither a new decoded video frame arrived nor camera panned.
+            // This prevents SurfaceFlinger buffer queue saturation and eliminates 60fps-on-90/120Hz judder!
+            if (!updatedFrame && !cameraMoving && (frameTimeNanos - lastSwapTimestampNs) < 32_000_000L) {
+                return
+            }
+
+            drawScene()
+
+            // Attach exact presentation time to SurfaceFlinger so fast-motion frames never jitter
+            try {
+                EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, frameTimeNanos)
+            } catch (_: Throwable) {
+            }
+            EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            lastSwapTimestampNs = frameTimeNanos
+        }
+
+        private fun drawScene() {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glUseProgram(program)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -241,7 +370,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
             if (projection == Projection.FLAT) {
                 Matrix.setIdentityM(mvpMatrix, 0)
-                val surfaceAspect = width.toFloat() / height.toFloat()
+                val surfaceAspect = viewportWidth.toFloat() / viewportHeight.toFloat()
                 val sx: Float
                 val sy: Float
                 if (videoAspect > surfaceAspect) {
@@ -253,10 +382,10 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 }
                 Matrix.scaleM(mvpMatrix, 0, sx, sy, 1f)
             } else {
-                currentYaw += (targetYaw - currentYaw) * 0.35f
-                currentPitch += (targetPitch - currentPitch) * 0.35f
+                currentYaw += (targetYaw - currentYaw) * 0.42f
+                currentPitch += (targetPitch - currentPitch) * 0.42f
 
-                val aspect = width.toFloat() / height.toFloat()
+                val aspect = viewportWidth.toFloat() / viewportHeight.toFloat()
                 Matrix.perspectiveM(projectionMatrix, 0, fieldOfView, aspect, 0.05f, 50f)
                 val yawRadians = Math.toRadians(currentYaw.toDouble()).toFloat()
                 val pitchRadians = Math.toRadians(currentPitch.toDouble()).toFloat()
@@ -281,8 +410,42 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             GLES20.glDisableVertexAttribArray(texCoordHandle)
         }
 
-        override fun onFrameAvailable(surfaceTexture: SurfaceTexture?) {
-            frameAvailable.set(true)
+        fun destroyEglAndSurface() {
+            isRunning = false
+            Choreographer.getInstance().removeFrameCallback(this)
+
+            val oldSurf = decoderSurface
+            decoderSurface = null
+            if (oldSurf != null) {
+                mainHandler.post {
+                    surfaceEvents?.onVideoSurfaceDestroyed(oldSurf)
+                    oldSurf.release()
+                }
+            }
+            decoderSurfaceTexture?.release()
+            decoderSurfaceTexture = null
+
+            if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+                EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                if (oesTextureId != 0) {
+                    GLES20.glDeleteTextures(1, intArrayOf(oesTextureId), 0)
+                    oesTextureId = 0
+                }
+                if (program != 0) {
+                    GLES20.glDeleteProgram(program)
+                    program = 0
+                }
+                if (eglSurface != EGL14.EGL_NO_SURFACE) {
+                    EGL14.eglDestroySurface(eglDisplay, eglSurface)
+                    eglSurface = EGL14.EGL_NO_SURFACE
+                }
+                if (eglContext != EGL14.EGL_NO_CONTEXT) {
+                    EGL14.eglDestroyContext(eglDisplay, eglContext)
+                    eglContext = EGL14.EGL_NO_CONTEXT
+                }
+                EGL14.eglTerminate(eglDisplay)
+                eglDisplay = EGL14.EGL_NO_DISPLAY
+            }
         }
 
         fun setProjection(next: Projection) {
@@ -311,7 +474,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             val aspect = displayWidth * pixelRatio / displayHeight.toFloat()
             if (aspect > 0f && aspect.isFinite()) videoAspect = aspect
             try {
-                surfaceTexture?.setDefaultBufferSize(width, height)
+                decoderSurfaceTexture?.setDefaultBufferSize(width, height)
             } catch (_: RuntimeException) {
             }
         }
@@ -333,7 +496,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
         private fun clamp180Bounds() {
             if (projection == Projection.VR180) {
-                val aspect = width.toFloat() / height.coerceAtLeast(1).toFloat()
+                val aspect = viewportWidth.toFloat() / viewportHeight.coerceAtLeast(1).toFloat()
                 val horizontalHalfFov = Math.toDegrees(
                     atan(tan(Math.toRadians(fieldOfView / 2.0)) * aspect)
                 ).toFloat()
@@ -350,19 +513,18 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             fieldOfView = 80f
         }
 
-        fun release() {
-            outputSurface?.release()
-            outputSurface = null
-            surfaceTexture?.release()
-            surfaceTexture = null
-            if (oesTextureId != 0) {
-                GLES20.glDeleteTextures(1, intArrayOf(oesTextureId), 0)
-                oesTextureId = 0
-            }
-            if (program != 0) {
-                GLES20.glDeleteProgram(program)
-                program = 0
-            }
+        private fun setupGlPipeline() {
+            GLES20.glClearColor(0.015f, 0.018f, 0.024f, 1f)
+            GLES20.glDisable(GLES20.GL_CULL_FACE)
+            GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+            GLES20.glDisable(GLES20.GL_DITHER)
+
+            program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
+            positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
+            texCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
+            mvpHandle = GLES20.glGetUniformLocation(program, "uMvpMatrix")
+            textureMatrixHandle = GLES20.glGetUniformLocation(program, "uTexMatrix")
+            samplerHandle = GLES20.glGetUniformLocation(program, "sTexture")
         }
 
         private fun rebuildMesh() {
