@@ -6,7 +6,6 @@ import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
-import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
@@ -283,7 +282,8 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, eglConfig, displaySurface, surfaceAttribs, 0)
 
             EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
-            EGL14.eglSwapInterval(eglDisplay, 1)
+            // Disable extra VSync swap hold so frames present immediately in exact lockstep with audio
+            EGL14.eglSwapInterval(eglDisplay, 0)
 
             setupGlPipeline()
 
@@ -377,11 +377,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             }
 
             drawScene()
-
-            try {
-                EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, frameTimeNanos)
-            } catch (_: Throwable) {
-            }
+            // Immediate swap without eglPresentationTimeANDROID hold prevents video lag behind audio
             EGL14.eglSwapBuffers(eglDisplay, eglSurface)
         }
 
