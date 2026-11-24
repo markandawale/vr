@@ -13,6 +13,9 @@ import android.os.Bundle
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
+import android.util.Log
+import android.view.Surface
 import android.provider.OpenableColumns
 import android.view.Gravity
 import android.view.MotionEvent
@@ -31,7 +34,9 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
 import java.util.Locale
@@ -128,7 +133,15 @@ class MainActivity : Activity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        player = ExoPlayer.Builder(this).build()
+        // Smooth-playback tuning for high-bitrate / high-resolution VR video:
+        //  * async MediaCodec queueing keeps the decoder fed during fast-motion
+        //    (large) frames instead of stalling on the playback thread
+        //  * decoder fallback lets Media3 pick another decoder if one can't keep up
+        val renderersFactory = DefaultRenderersFactory(this)
+            .setEnableDecoderFallback(true)
+            .forceEnableMediaCodecAsynchronousQueueing()
+        player = ExoPlayer.Builder(this, renderersFactory).build()
+        player.addAnalyticsListener(statsListener)
         buildInterface()
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -147,6 +160,7 @@ class MainActivity : Activity() {
             }
 
             override fun onRenderedFirstFrame() {
+                tuneSphericalSurface()
                 if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
                     val projection = currentProjection
                     val layout = stereoLayout
@@ -177,6 +191,62 @@ class MainActivity : Activity() {
             }
         })
         mainHandler.post(progressUpdater)
+    }
+
+    // ---- Smoothness tuning / diagnostics --------------------------------
+    private var droppedFrames = 0
+    private var decoderName = ""
+
+    private val statsListener = object : AnalyticsListener {
+        override fun onVideoDecoderInitialized(
+            eventTime: AnalyticsListener.EventTime,
+            decoderName: String,
+            initializedTimestampMs: Long,
+            initializationDurationMs: Long
+        ) {
+            this@MainActivity.decoderName = decoderName
+            droppedFrames = 0
+            Log.i(TAG, "Video decoder: $decoderName")
+        }
+
+        override fun onDroppedVideoFrames(
+            eventTime: AnalyticsListener.EventTime,
+            droppedFrames: Int,
+            elapsedMs: Long
+        ) {
+            this@MainActivity.droppedFrames += droppedFrames
+            Log.w(TAG, "Dropped $droppedFrames frames in ${elapsedMs}ms (total ${this@MainActivity.droppedFrames})")
+            if (SHOW_DEBUG_STATS) mainHandler.post { showDebugStats() }
+        }
+    }
+
+    private fun showDebugStats() {
+        if (!::titleView.isInitialized) return
+        val f = player.videoFormat
+        val res = if (f != null) "${f.width}x${f.height}" else "?"
+        val fps = if (f != null && f.frameRate > 0f) "%.0ffps".format(Locale.US, f.frameRate) else "?fps"
+        val codec = f?.sampleMimeType?.substringAfter('/') ?: "?"
+        titleView.text = "$res $fps $codec | drops: $droppedFrames | $decoderName"
+    }
+
+    /** Raises the GL thread priority and tells the display the video's frame rate. */
+    private fun tuneSphericalSurface() {
+        val view = sphericalView ?: return
+        view.queueEvent {
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+            } catch (_: Throwable) { }
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            val fps = player.videoFormat?.frameRate ?: -1f
+            val surface = view.holder?.surface
+            if (fps > 0f && surface != null && surface.isValid) {
+                try {
+                    surface.setFrameRate(fps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+                } catch (_: Throwable) { }
+            }
+        }
+        if (SHOW_DEBUG_STATS) showDebugStats()
     }
 
     private var currentVideoName: String = ""
@@ -891,5 +961,8 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_VIDEO = 4102
+        private const val TAG = "PanoPlay"
+        /** Shows resolution / fps / decoder / dropped-frame count in the title bar while testing. */
+        private const val SHOW_DEBUG_STATS = true
     }
 }
