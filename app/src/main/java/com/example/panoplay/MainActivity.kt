@@ -43,10 +43,12 @@ import android.widget.Toast
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
@@ -54,6 +56,7 @@ import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import java.util.ArrayList
 import java.util.Locale
@@ -350,6 +353,8 @@ class MainActivity : Activity() {
     private lateinit var vrSurfaceView: VrVideoSurfaceView
     private var vrOutputSurface: Surface? = null
     private var pendingMediaUri: Uri? = null
+    private var activeMediaUri: Uri? = null
+    private var ioRetryCount = 0
 
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
@@ -530,7 +535,12 @@ class MainActivity : Activity() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
+        // Fresh DefaultDataSourceFactory ensures clean ContentResolver descriptor allocation per playback
+        val dataSourceFactory = DefaultDataSource.Factory(this)
+        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+
         player = ExoPlayer.Builder(this, renderersFactory)
+            .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, true)
             .build()
 
@@ -547,6 +557,7 @@ class MainActivity : Activity() {
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) {
+                    ioRetryCount = 0
                     placeholder.visibility = View.GONE
                     val resolvedName = currentVideoName.ifBlank { "Now playing" }
                     titleView.text = resolvedName
@@ -570,7 +581,33 @@ class MainActivity : Activity() {
                 }
             }
 
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+            override fun onPlayerError(error: PlaybackException) {
+                val uri = activeMediaUri
+                // Automatically recover from transient SAF/ContentResolver IO errors without restarting the app
+                if (uri != null &&
+                    ioRetryCount < 2 &&
+                    (error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
+                        error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ||
+                        error.errorCode == PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE)
+                ) {
+                    ioRetryCount++
+                    val resumePosition = player.currentPosition.coerceAtLeast(0L)
+                    mainHandler.postDelayed({
+                        if (::player.isInitialized && activeMediaUri == uri) {
+                            rebindActiveSurface()
+                            player.stop()
+                            player.clearMediaItems()
+                            player.setMediaItem(MediaItem.fromUri(uri))
+                            if (resumePosition > 0L) {
+                                player.seekTo(resumePosition)
+                            }
+                            player.prepare()
+                            player.playWhenReady = true
+                        }
+                    }, 180L)
+                    return
+                }
+
                 Toast.makeText(
                     this@MainActivity,
                     "Can't play this video: ${error.errorCodeName}",
@@ -580,6 +617,17 @@ class MainActivity : Activity() {
             }
         })
         mainHandler.post(progressUpdater)
+    }
+
+    private fun rebindActiveSurface() {
+        if (currentProjection == VrVideoSurfaceView.Projection.FLAT) {
+            playerView.player = player
+        } else {
+            val activeSurface = vrOutputSurface ?: vrSurfaceView.getVideoSurface()
+            if (activeSurface != null && activeSurface.isValid) {
+                player.setVideoSurface(activeSurface)
+            }
+        }
     }
 
     private var currentVideoName: String = ""
@@ -1338,32 +1386,31 @@ class MainActivity : Activity() {
         }
         videoFrame.addView(fullscreenButton, fullscreenParams)
 
-        // Redesigned Cinema Floating Fullscreen Controls Dock
+        // Translucent Frosted-Glass Cinema Fullscreen Controls Dock
         fullscreenControls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(14), dp(10), dp(14), dp(10))
             background = GradientDrawable().apply {
-                setColor(Color.argb(208, 12, 14, 19))
+                setColor(Color.argb(105, 12, 14, 19))
                 cornerRadius = dp(20).toFloat()
-                setStroke(dp(1), Color.argb(38, 255, 255, 255))
+                setStroke(dp(1), Color.argb(35, 255, 255, 255))
             }
-            elevation = dp(6).toFloat()
+            elevation = dp(4).toFloat()
         }
 
-        // Top row inside dock: Video title + Exit Fullscreen button
         val dockTopRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(2), 0, dp(2), dp(4))
         }
-        fullscreenTitleView = text("Now playing", 11.5f, Color.rgb(230, 234, 242), true).apply {
+        fullscreenTitleView = text("Now playing", 11.5f, Color.rgb(235, 239, 246), true).apply {
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
         val exitFullscreenBtn = text("✕", 13f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            background = rounded(Color.argb(120, 42, 46, 56), 14)
+            background = rounded(Color.argb(95, 42, 46, 56), 14)
             isClickable = true
             isFocusable = true
             contentDescription = "Exit full screen"
@@ -1375,7 +1422,6 @@ class MainActivity : Activity() {
         dockTopRow.addView(exitFullscreenBtn, LinearLayout.LayoutParams(dp(28), dp(26)))
         fullscreenControls.addView(dockTopRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        // Middle row: Time — Custom CinemaSeekBar — Duration
         overlaySeekBar = CinemaSeekBar(this).apply {
             max = 1000
             onStartScrub = {
@@ -1406,7 +1452,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL or Gravity.START
             includeFontPadding = false
         }
-        fullscreenDuration = text("00:00", 10.5f, Color.rgb(168, 174, 186), true).apply {
+        fullscreenDuration = text("00:00", 10.5f, Color.rgb(195, 200, 212), true).apply {
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
             includeFontPadding = false
         }
@@ -1418,7 +1464,6 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
-        // Bottom row: Speed Pill | -10s | Play/Pause | +10s | Rotate
         val rewind = transportButton("↶ 10").apply {
             setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
         }
@@ -1451,7 +1496,7 @@ class MainActivity : Activity() {
         listOf(overlaySpeedButton, rewind, overlayPlayButton, forward, overlayRotateButton).forEachIndexed { index, control ->
             val isPlay = index == 2
             control.background = rounded(
-                if (isPlay) Color.rgb(255, 79, 94) else Color.argb(170, 32, 36, 46),
+                if (isPlay) Color.argb(215, 255, 79, 94) else Color.argb(115, 32, 36, 46),
                 if (isPlay) 22 else 14
             )
             control.textSize = when (index) {
@@ -1788,8 +1833,12 @@ class MainActivity : Activity() {
     }
 
     private fun startPlayback(uri: Uri) {
+        activeMediaUri = uri
+        ioRetryCount = 0
         lastRenderedFrames = 0
         lastFpsCheckTimeMs = 0L
+        player.stop()
+        player.clearMediaItems()
         player.setMediaItem(MediaItem.fromUri(uri))
         player.prepare()
         player.playWhenReady = true
