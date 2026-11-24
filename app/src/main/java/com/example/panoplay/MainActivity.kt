@@ -39,8 +39,15 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.audio.AudioRendererEventListener
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.ui.PlayerView
+import java.util.ArrayList
 import java.util.Locale
 import kotlin.math.abs
 
@@ -138,6 +145,53 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
 }
 
 @OptIn(UnstableApi::class)
+private class TwsAudioRenderer(
+    context: Context,
+    mediaCodecSelector: MediaCodecSelector,
+    enableDecoderFallback: Boolean,
+    eventHandler: Handler,
+    eventListener: AudioRendererEventListener,
+    audioSink: AudioSink,
+    private val getOffsetUs: () -> Long
+) : MediaCodecAudioRenderer(
+    context,
+    mediaCodecSelector,
+    enableDecoderFallback,
+    eventHandler,
+    eventListener,
+    audioSink
+) {
+    override fun processOutputBuffer(
+        positionUs: Long,
+        elapsedRealtimeUs: Long,
+        codec: androidx.media3.exoplayer.mediacodec.MediaCodecAdapter?,
+        buffer: java.nio.ByteBuffer?,
+        bufferIndex: Int,
+        bufferFlags: Int,
+        sampleCount: Int,
+        bufferPresentationTimeUs: Long,
+        isDecodeOnlyBuffer: Boolean,
+        isLastBuffer: Boolean,
+        format: androidx.media3.common.Format
+    ): Boolean {
+        val shiftedPtsUs = (bufferPresentationTimeUs + getOffsetUs()).coerceAtLeast(0L)
+        return super.processOutputBuffer(
+            positionUs,
+            elapsedRealtimeUs,
+            codec,
+            buffer,
+            bufferIndex,
+            bufferFlags,
+            sampleCount,
+            shiftedPtsUs,
+            isDecodeOnlyBuffer,
+            isLastBuffer,
+            format
+        )
+    }
+}
+
+@OptIn(UnstableApi::class)
 class MainActivity : Activity() {
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
@@ -174,6 +228,9 @@ class MainActivity : Activity() {
     private var lastRenderedFrames = 0
     private var lastFpsCheckTimeMs = 0L
     private var showFpsEnabled = true
+
+    @Volatile
+    private var audioOffsetMs = 0
 
     private val speedSteps = floatArrayOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
     private var currentSpeed = 1.0f
@@ -269,6 +326,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         showFpsEnabled = prefs.getBoolean(KEY_SHOW_FPS, true)
+        audioOffsetMs = prefs.getInt(KEY_AUDIO_OFFSET_MS, 0).coerceIn(-500, 500)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -277,13 +335,38 @@ class MainActivity : Activity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        // Pure stock ExoPlayer builder (exact same audio/video clock sync as original APK)
+        // Video renderer remains 100% stock hardware MediaCodec; only audio renderer applies optional TWS offset
+        val renderersFactory = object : DefaultRenderersFactory(this) {
+            override fun buildAudioRenderers(
+                context: Context,
+                extensionRendererMode: Int,
+                mediaCodecSelector: MediaCodecSelector,
+                enableDecoderFallback: Boolean,
+                audioSink: AudioSink,
+                eventHandler: Handler,
+                eventListener: AudioRendererEventListener,
+                out: ArrayList<Renderer>
+            ) {
+                out.add(
+                    TwsAudioRenderer(
+                        context = context,
+                        mediaCodecSelector = mediaCodecSelector,
+                        enableDecoderFallback = enableDecoderFallback,
+                        eventHandler = eventHandler,
+                        eventListener = eventListener,
+                        audioSink = audioSink,
+                        getOffsetUs = { audioOffsetMs * 1000L }
+                    )
+                )
+            }
+        }
+
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        player = ExoPlayer.Builder(this)
+        player = ExoPlayer.Builder(this, renderersFactory)
             .setAudioAttributes(audioAttributes, true)
             .build()
 
@@ -418,6 +501,12 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun formatOffsetLabel(ms: Int): String = when {
+        ms > 0 -> "+$ms ms"
+        ms < 0 -> "$ms ms"
+        else -> "0 ms"
+    }
+
     private fun openSettingsDialog() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val container = LinearLayout(this).apply {
@@ -432,6 +521,7 @@ class MainActivity : Activity() {
         }
         container.addView(dialogTitle)
 
+        // 1. Show Live FPS Toggle
         val fpsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -460,6 +550,82 @@ class MainActivity : Activity() {
         fpsRow.addView(fpsSwitch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         container.addView(fpsRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
+        // 2. TWS Audio Sync Offset (-500ms to +500ms in 25ms steps)
+        val audioCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = rounded(Color.rgb(28, 31, 38), 14)
+        }
+        val audioHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val audioTitle = text("Audio Sync Offset (TWS)", 13f, Color.WHITE, true)
+        val audioValueText = text(formatOffsetLabel(audioOffsetMs), 12f, Color.rgb(255, 79, 94), true).apply {
+            gravity = Gravity.END
+        }
+        audioHeader.addView(audioTitle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        audioHeader.addView(audioValueText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        audioCard.addView(audioHeader)
+
+        val audioHint = text("Use negative (-ms) if Bluetooth TWS audio is behind video", 10f, Color.rgb(152, 158, 170), false).apply {
+            setPadding(0, dp(3), 0, dp(8))
+        }
+        audioCard.addView(audioHint)
+
+        val audioSeekBar = SeekBar(this).apply {
+            max = 40
+            progress = ((audioOffsetMs + 500) / 25).coerceIn(0, 40)
+            progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(255, 79, 94))
+            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
+                    val newOffset = (value - 20) * 25
+                    audioOffsetMs = newOffset
+                    audioValueText.text = formatOffsetLabel(newOffset)
+                    if (fromUser) {
+                        prefs.edit().putInt(KEY_AUDIO_OFFSET_MS, newOffset).apply()
+                    }
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) {}
+                override fun onStopTrackingTouch(bar: SeekBar?) {
+                    if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
+                        player.seekTo(player.currentPosition)
+                    }
+                }
+            })
+        }
+        audioCard.addView(audioSeekBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30)))
+
+        val resetOffsetBtn = text("RESET (0 ms)", 10f, Color.rgb(200, 205, 214), true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            background = rounded(Color.rgb(42, 46, 56), 10)
+            setOnClickListener {
+                audioOffsetMs = 0
+                audioSeekBar.progress = 20
+                audioValueText.text = formatOffsetLabel(0)
+                prefs.edit().putInt(KEY_AUDIO_OFFSET_MS, 0).apply()
+                if (player.playbackState == Player.STATE_READY) {
+                    player.seekTo(player.currentPosition)
+                }
+            }
+        }
+        audioCard.addView(
+            resetOffsetBtn,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(6)
+                gravity = Gravity.END
+            }
+        )
+
+        container.addView(
+            audioCard,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(10)
+            }
+        )
+
         val dialog = AlertDialog.Builder(this)
             .setView(container)
             .create()
@@ -471,7 +637,7 @@ class MainActivity : Activity() {
         container.addView(
             closeBtn,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)).apply {
-                topMargin = dp(18)
+                topMargin = dp(16)
             }
         )
 
@@ -1229,5 +1395,6 @@ class MainActivity : Activity() {
         private const val REQUEST_VIDEO = 4102
         private const val PREFS_NAME = "panoplay_settings"
         private const val KEY_SHOW_FPS = "show_live_fps"
+        private const val KEY_AUDIO_OFFSET_MS = "audio_offset_ms"
     }
 }
