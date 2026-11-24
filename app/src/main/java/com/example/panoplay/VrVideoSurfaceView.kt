@@ -22,11 +22,13 @@ import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.VelocityTracker
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.atan
 import kotlin.math.cos
 import kotlin.math.sin
@@ -54,6 +56,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
     private var previousX = 0f
     private var previousY = 0f
+    private var velocityTracker: VelocityTracker? = null
 
     private val scaleDetector = ScaleGestureDetector(
         context,
@@ -142,9 +145,13 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 previousX = event.x
                 previousY = event.y
+                velocityTracker?.recycle()
+                velocityTracker = VelocityTracker.obtain().apply { addMovement(event) }
+                postGl { renderEngine.stopInertia() }
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                velocityTracker?.addMovement(event)
                 if (!scaleDetector.isInProgress && event.pointerCount == 1) {
                     val dx = event.x - previousX
                     val dy = event.y - previousY
@@ -155,7 +162,24 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 previousY = event.y
                 return true
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> return true
+            MotionEvent.ACTION_UP -> {
+                velocityTracker?.let { vt ->
+                    vt.addMovement(event)
+                    vt.computeCurrentVelocity(1000)
+                    val vx = vt.xVelocity
+                    val vy = vt.yVelocity
+                    val viewW = width.coerceAtLeast(1)
+                    postGl { renderEngine.fling(vx, vy, viewW) }
+                    vt.recycle()
+                }
+                velocityTracker = null
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                velocityTracker?.recycle()
+                velocityTracker = null
+                return true
+            }
         }
         return true
     }
@@ -211,7 +235,10 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         private var targetPitch = 0f
         private var currentYaw = 0f
         private var currentPitch = 0f
-        private var fieldOfView = 80f
+        private var velocityYaw = 0f
+        private var velocityPitch = 0f
+        // Wide, natural default FOV so 180°/360° video does not feel zoomed-in on open
+        private var fieldOfView = DEFAULT_FOV
 
         private var vertexBuffer: FloatBuffer? = null
         private var texBuffer: FloatBuffer? = null
@@ -296,7 +323,6 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             rebuildMesh()
 
             isRunning = true
-            // Notify MainActivity on Main Thread so ExoPlayer binds this Surface immediately
             mainHandler.post {
                 surfaceEvents?.onVideoSurfaceAvailable(decSurf)
             }
@@ -337,10 +363,21 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 }
             }
 
-            val cameraMoving = kotlin.math.abs(targetYaw - currentYaw) > 0.002f ||
-                kotlin.math.abs(targetPitch - currentPitch) > 0.002f
+            // Apply smooth momentum glide after finger release
+            if (abs(velocityYaw) > 0.01f || abs(velocityPitch) > 0.01f) {
+                targetYaw += velocityYaw
+                targetPitch = (targetPitch + velocityPitch).coerceIn(-82f, 82f)
+                clamp180Bounds()
+                velocityYaw *= 0.88f
+                velocityPitch *= 0.88f
+                if (abs(velocityYaw) < 0.01f) velocityYaw = 0f
+                if (abs(velocityPitch) < 0.01f) velocityPitch = 0f
+            }
 
-            // Draw on every new decoded video frame, camera pan, or initial surface clear
+            val cameraMoving = abs(targetYaw - currentYaw) > 0.002f ||
+                abs(targetPitch - currentPitch) > 0.002f ||
+                velocityYaw != 0f || velocityPitch != 0f
+
             if (!updatedFrame && !cameraMoving && firstFrameDrawn) {
                 return
             }
@@ -376,8 +413,9 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 }
                 Matrix.scaleM(mvpMatrix, 0, sx, sy, 1f)
             } else {
-                currentYaw += (targetYaw - currentYaw) * 0.18f
-                currentPitch += (targetPitch - currentPitch) * 0.18f
+                // Smooth, effortless camera follow
+                currentYaw += (targetYaw - currentYaw) * 0.24f
+                currentPitch += (targetPitch - currentPitch) * 0.24f
 
                 val aspect = viewportWidth.toFloat() / viewportHeight.toFloat()
                 Matrix.perspectiveM(projectionMatrix, 0, fieldOfView, aspect, 0.05f, 50f)
@@ -449,7 +487,9 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             targetPitch = 0f
             currentYaw = 0f
             currentPitch = 0f
-            fieldOfView = 80f
+            velocityYaw = 0f
+            velocityPitch = 0f
+            fieldOfView = DEFAULT_FOV
             firstFrameDrawn = false
             rebuildMesh()
         }
@@ -475,18 +515,32 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             }
         }
 
+        fun stopInertia() {
+            velocityYaw = 0f
+            velocityPitch = 0f
+        }
+
         fun drag(dx: Float, dy: Float, viewWidth: Int) {
             if (projection == Projection.FLAT) return
-            val zoomScale = (fieldOfView / 80f).coerceIn(0.45f, 1.25f)
-            val sensitivity = (95f / viewWidth.coerceAtLeast(1)) * zoomScale
+            val zoomScale = (fieldOfView / DEFAULT_FOV).coerceIn(0.45f, 1.25f)
+            val sensitivity = (135f / viewWidth.coerceAtLeast(1)) * zoomScale
             targetYaw -= dx * sensitivity
             targetPitch = (targetPitch + dy * sensitivity).coerceIn(-82f, 82f)
             clamp180Bounds()
         }
 
+        fun fling(vxPxPerSec: Float, vyPxPerSec: Float, viewWidth: Int) {
+            if (projection == Projection.FLAT) return
+            val zoomScale = (fieldOfView / DEFAULT_FOV).coerceIn(0.45f, 1.25f)
+            val sensitivity = (135f / viewWidth.coerceAtLeast(1)) * zoomScale
+            // Convert px/sec into smooth per-frame glide impulse
+            velocityYaw = (-vxPxPerSec * sensitivity * 0.012f).coerceIn(-3.5f, 3.5f)
+            velocityPitch = (vyPxPerSec * sensitivity * 0.012f).coerceIn(-2.5f, 2.5f)
+        }
+
         fun zoom(scaleFactor: Float) {
             if (projection != Projection.FLAT) {
-                fieldOfView = (fieldOfView / scaleFactor).coerceIn(45f, 100f)
+                fieldOfView = (fieldOfView / scaleFactor).coerceIn(45f, 108f)
                 clamp180Bounds()
                 firstFrameDrawn = false
             }
@@ -508,7 +562,9 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             targetPitch = 0f
             currentYaw = 0f
             currentPitch = 0f
-            fieldOfView = 80f
+            velocityYaw = 0f
+            velocityPitch = 0f
+            fieldOfView = DEFAULT_FOV
             firstFrameDrawn = false
         }
 
@@ -574,8 +630,6 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                     StereoLayout.SBS_LEFT -> sourceU * 0.5f
                     StereoLayout.SBS_RIGHT -> 0.5f + sourceU * 0.5f
                 }
-                // SurfaceTexture's uTexMatrix already flips Y from top-down to OpenGL bottom-up,
-                // so v must map bottom (-PI/2) -> 0.0 and top (+PI/2) -> 1.0.
                 val v = ((latitude + PI / 2.0) / PI).toFloat()
                 tex[tIdx++] = u
                 tex[tIdx++] = v
@@ -647,6 +701,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
     }
 
     companion object {
+        private const val DEFAULT_FOV = 92f
         private const val VERTEX_SHADER = """
             uniform mat4 uMvpMatrix;
             uniform mat4 uTexMatrix;
