@@ -56,13 +56,23 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
     private var previousX = 0f
     private var previousY = 0f
+    private var activePointerId = MotionEvent.INVALID_POINTER_ID
+    private var wasPinching = false
 
     private val scaleDetector = ScaleGestureDetector(
         context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                wasPinching = true
+                return true
+            }
+
             override fun onScale(detector: ScaleGestureDetector): Boolean {
+                wasPinching = true
                 val factor = detector.scaleFactor
-                postGl { renderEngine.zoom(factor) }
+                if (factor.isFinite() && factor > 0.2f && factor < 5.0f) {
+                    postGl { renderEngine.zoom(factor) }
+                }
                 return true
             }
         }
@@ -142,24 +152,57 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         scaleDetector.onTouchEvent(event)
+
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                wasPinching = false
+                activePointerId = event.getPointerId(0)
                 previousX = event.x
                 previousY = event.y
+                return true
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                // Second finger touched down: lock out single-finger panning for this gesture
+                wasPinching = true
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                if (!scaleDetector.isInProgress && event.pointerCount == 1) {
-                    val dx = event.x - previousX
-                    val dy = event.y - previousY
+                // Never pan if pinching occurred or more than 1 finger is on screen
+                if (wasPinching || scaleDetector.isInProgress || event.pointerCount > 1) {
+                    return true
+                }
+                val pointerIndex = event.findPointerIndex(activePointerId)
+                if (pointerIndex != -1) {
+                    val x = event.getX(pointerIndex)
+                    val y = event.getY(pointerIndex)
+                    val dx = x - previousX
+                    val dy = y - previousY
+                    previousX = x
+                    previousY = y
                     val viewW = width.coerceAtLeast(1)
                     postGl { renderEngine.drag(dx, dy, viewW) }
                 }
-                previousX = event.x
-                previousY = event.y
                 return true
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> return true
+            MotionEvent.ACTION_POINTER_UP -> {
+                // Sync remaining finger's position so lifting one finger never causes a jump
+                val liftedIndex = event.actionIndex
+                val liftedId = event.getPointerId(liftedIndex)
+                val newIndex = if (liftedIndex == 0) 1 else 0
+                if (newIndex < event.pointerCount) {
+                    activePointerId = event.getPointerId(newIndex)
+                    previousX = event.getX(newIndex)
+                    previousY = event.getY(newIndex)
+                } else if (liftedId == activePointerId) {
+                    activePointerId = MotionEvent.INVALID_POINTER_ID
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                activePointerId = MotionEvent.INVALID_POINTER_ID
+                wasPinching = false
+                return true
+            }
         }
         return true
     }
@@ -282,7 +325,6 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, eglConfig, displaySurface, surfaceAttribs, 0)
 
             EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
-            // VSync lock ON (1) — guarantees 100% buttery 60fps smoothness with zero tearing/choppiness
             EGL14.eglSwapInterval(eglDisplay, 1)
 
             setupGlPipeline()
