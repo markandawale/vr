@@ -41,7 +41,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 ) : SurfaceView(context, attrs), SurfaceHolder.Callback {
 
     enum class Projection { FLAT, VR180, VR360 }
-    enum class StereoLayout { MONO, SBS_LEFT, SBS_RIGHT }
+    enum class StereoLayout { MONO, SBS_LEFT, SBS_RIGHT, OU_TOP, OU_BOTTOM }
 
     interface SurfaceEvents {
         fun onVideoSurfaceAvailable(surface: Surface)
@@ -220,6 +220,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         private var targetPitch = 0f
         private var currentYaw = 0f
         private var currentPitch = 0f
+        private var targetFov = DEFAULT_FOV
         private var fieldOfView = DEFAULT_FOV
 
         private var vertexBuffer: FloatBuffer? = null
@@ -370,7 +371,8 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             }
 
             val cameraMoving = abs(targetYaw - currentYaw) > 0.002f ||
-                abs(targetPitch - currentPitch) > 0.002f
+                abs(targetPitch - currentPitch) > 0.002f ||
+                abs(targetFov - fieldOfView) > 0.01f
 
             if (!updatedFrame && !cameraMoving && firstFrameDrawn) {
                 return
@@ -407,9 +409,9 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 }
                 Matrix.scaleM(mvpMatrix, 0, sx, sy, 1f)
             } else {
-                // Restored previous controlled camera smoothing
                 currentYaw += (targetYaw - currentYaw) * 0.18f
                 currentPitch += (targetPitch - currentPitch) * 0.18f
+                fieldOfView += (targetFov - fieldOfView) * 0.25f
 
                 val aspect = viewportWidth.toFloat() / viewportHeight.toFloat()
                 Matrix.perspectiveM(projectionMatrix, 0, fieldOfView, aspect, 0.05f, 50f)
@@ -481,6 +483,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             targetPitch = 0f
             currentYaw = 0f
             currentPitch = 0f
+            targetFov = DEFAULT_FOV
             fieldOfView = DEFAULT_FOV
             firstFrameDrawn = false
             rebuildMesh()
@@ -518,7 +521,8 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
         fun zoom(scaleFactor: Float) {
             if (projection != Projection.FLAT) {
-                fieldOfView = (fieldOfView / scaleFactor).coerceIn(45f, 108f)
+                targetFov = (targetFov / scaleFactor).coerceIn(45f, 108f)
+                fieldOfView = targetFov
                 clamp180Bounds()
                 firstFrameDrawn = false
             }
@@ -528,7 +532,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             if (projection == Projection.VR180) {
                 val aspect = viewportWidth.toFloat() / viewportHeight.coerceAtLeast(1).toFloat()
                 val horizontalHalfFov = Math.toDegrees(
-                    atan(tan(Math.toRadians(fieldOfView / 2.0)) * aspect)
+                    atan(tan(Math.toRadians(targetFov / 2.0)) * aspect)
                 ).toFloat()
                 val yawLimit = (90f - horizontalHalfFov - 1.5f).coerceAtLeast(0f)
                 targetYaw = targetYaw.coerceIn(-yawLimit, yawLimit)
@@ -538,9 +542,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         fun resetView() {
             targetYaw = 0f
             targetPitch = 0f
-            currentYaw = 0f
-            currentPitch = 0f
-            fieldOfView = DEFAULT_FOV
+            targetFov = DEFAULT_FOV
             firstFrameDrawn = false
         }
 
@@ -559,23 +561,33 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         }
 
         private fun rebuildMesh() {
+            val u0 = when (stereoLayout) {
+                StereoLayout.SBS_RIGHT -> 0.5f
+                else -> 0f
+            }
+            val u1 = when (stereoLayout) {
+                StereoLayout.SBS_LEFT -> 0.5f
+                else -> 1f
+            }
+            // In OpenGL bottom-up coordinates (after uTexMatrix Y-flip):
+            // Top half of source video maps to [0.5, 1.0], bottom half maps to [0.0, 0.5].
+            val vMin = when (stereoLayout) {
+                StereoLayout.OU_TOP -> 0.5f
+                else -> 0f
+            }
+            val vMax = when (stereoLayout) {
+                StereoLayout.OU_BOTTOM -> 0.5f
+                else -> 1f
+            }
+
             if (projection == Projection.FLAT) {
                 val positions = floatArrayOf(
                     -1f, -1f, 0f,  1f, -1f, 0f, -1f, 1f, 0f,
                     -1f, 1f, 0f,   1f, -1f, 0f,  1f, 1f, 0f
                 )
-                val u0 = when (stereoLayout) {
-                    StereoLayout.MONO, StereoLayout.SBS_LEFT -> 0f
-                    StereoLayout.SBS_RIGHT -> 0.5f
-                }
-                val u1 = when (stereoLayout) {
-                    StereoLayout.MONO -> 1f
-                    StereoLayout.SBS_LEFT -> 0.5f
-                    StereoLayout.SBS_RIGHT -> 1f
-                }
                 val tex = floatArrayOf(
-                    u0, 1f,  u1, 1f,  u0, 0f,
-                    u0, 0f,  u1, 1f,  u1, 0f
+                    u0, vMax,  u1, vMax,  u0, vMin,
+                    u0, vMin,  u1, vMax,  u1, vMin
                 )
                 setBuffers(positions, tex)
                 return
@@ -601,14 +613,9 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 positions[pIdx++] = (-cosLat * cos(longitude)).toFloat()
 
                 val sourceU = column.toFloat() / columns
-                val u = when (stereoLayout) {
-                    StereoLayout.MONO -> sourceU
-                    StereoLayout.SBS_LEFT -> sourceU * 0.5f
-                    StereoLayout.SBS_RIGHT -> 0.5f + sourceU * 0.5f
-                }
-                val v = ((latitude + PI / 2.0) / PI).toFloat()
-                tex[tIdx++] = u
-                tex[tIdx++] = v
+                val sourceV = ((latitude + PI / 2.0) / PI).toFloat()
+                tex[tIdx++] = u0 + sourceU * (u1 - u0)
+                tex[tIdx++] = vMin + sourceV * (vMax - vMin)
             }
 
             for (r in 0 until rows) {
