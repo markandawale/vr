@@ -9,6 +9,9 @@ import android.database.Cursor
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -28,6 +31,7 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.PopupMenu
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
@@ -50,6 +54,7 @@ import androidx.media3.ui.PlayerView
 import java.util.ArrayList
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.min
 
 private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
     var onVideoSingleTap: (() -> Unit)? = null
@@ -228,6 +233,7 @@ class MainActivity : Activity() {
     private var lastRenderedFrames = 0
     private var lastFpsCheckTimeMs = 0L
     private var showFpsEnabled = true
+    private var showModeBadgeEnabled = true
 
     @Volatile
     private var audioOffsetMs = 0
@@ -322,10 +328,20 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun applyModeBadgeVisibility() {
+        if (!::modeBadge.isInitialized) return
+        if (!showModeBadgeEnabled) {
+            modeBadge.visibility = View.GONE
+        } else {
+            modeBadge.visibility = if (isFullscreen && !fullscreenControlsVisible) View.INVISIBLE else View.VISIBLE
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         showFpsEnabled = prefs.getBoolean(KEY_SHOW_FPS, true)
+        showModeBadgeEnabled = prefs.getBoolean(KEY_SHOW_MODE_BADGE, true)
         audioOffsetMs = prefs.getInt(KEY_AUDIO_OFFSET_MS, 0).coerceIn(-500, 500)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
@@ -335,7 +351,6 @@ class MainActivity : Activity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        // Video renderer remains 100% stock hardware MediaCodec; only audio renderer applies optional TWS offset
         val renderersFactory = object : DefaultRenderersFactory(this) {
             override fun buildAudioRenderers(
                 context: Context,
@@ -517,7 +532,7 @@ class MainActivity : Activity() {
 
         val dialogTitle = text("PLAYER SETTINGS", 14f, Color.WHITE, true).apply {
             letterSpacing = 0.06f
-            setPadding(0, 0, 0, dp(16))
+            setPadding(0, 0, 0, dp(14))
         }
         container.addView(dialogTitle)
 
@@ -550,7 +565,41 @@ class MainActivity : Activity() {
         fpsRow.addView(fpsSwitch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         container.addView(fpsRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        // 2. TWS Audio Sync Offset (-500ms to +500ms in 25ms steps)
+        // 2. Show View Mode Badge Toggle (Top-Left 180°/360° Eye Badge)
+        val modeBadgeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = rounded(Color.rgb(28, 31, 38), 14)
+        }
+        val modeBadgeTextCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val modeBadgeLabel = text("Show View Mode Badge", 13f, Color.WHITE, true)
+        val modeBadgeSub = text("Display 180° / 360° & Eye label on top-left", 10f, Color.rgb(152, 158, 170), false).apply {
+            setPadding(0, dp(3), 0, 0)
+        }
+        modeBadgeTextCol.addView(modeBadgeLabel)
+        modeBadgeTextCol.addView(modeBadgeSub)
+        modeBadgeRow.addView(modeBadgeTextCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        val modeBadgeSwitch = Switch(this).apply {
+            isChecked = showModeBadgeEnabled
+            setOnCheckedChangeListener { _, isChecked ->
+                showModeBadgeEnabled = isChecked
+                prefs.edit().putBoolean(KEY_SHOW_MODE_BADGE, isChecked).apply()
+                applyModeBadgeVisibility()
+            }
+        }
+        modeBadgeRow.addView(modeBadgeSwitch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        container.addView(
+            modeBadgeRow,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(10)
+            }
+        )
+
+        // 3. TWS Audio Sync Offset (-500ms to +500ms in 25ms steps)
         val audioCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(12))
@@ -644,6 +693,299 @@ class MainActivity : Activity() {
         dialog.show()
     }
 
+    private fun chooseVideoForMetadata() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "video/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        @Suppress("DEPRECATION")
+        startActivityForResult(intent, REQUEST_METADATA)
+    }
+
+    private fun inspectAndShowMetadata(uri: Uri) {
+        val fileName = queryDisplayName(uri).ifBlank { "Unknown video" }
+        val fileSizeBytes = queryFileSize(uri)
+        val fileSizeText = formatFileSize(fileSizeBytes)
+
+        var width = 0
+        var height = 0
+        var rotation = 0
+        var durationMs = 0L
+        var overallBitrate = 0L
+        var mimeContainer = "MP4 / Video"
+
+        var videoCodec = "Unknown"
+        var videoFpsText = "Unknown"
+        var videoBitrateText = "Unknown"
+        var colorInfoText = "Standard (SDR)"
+
+        var audioCodec = "None"
+        var audioSampleRateText = "Unknown"
+        var audioChannelsText = "Unknown"
+        var audioBitrateText = "Unknown"
+
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(this, uri)
+            width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+            durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            overallBitrate = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull() ?: 0L
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)?.let {
+                if (it.isNotBlank()) mimeContainer = it
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val frameRateStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)
+                val parsedFps = frameRateStr?.toFloatOrNull()
+                if (parsedFps != null && parsedFps > 0f) {
+                    videoFpsText = String.format(Locale.US, "%.2f FPS", parsedFps)
+                }
+            }
+        } catch (_: Exception) {
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {
+            }
+        }
+
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(this, uri, null)
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
+                if (mime.startsWith("video/")) {
+                    videoCodec = friendlyCodecName(mime)
+                    if (width == 0 && format.containsKey(MediaFormat.KEY_WIDTH)) {
+                        width = format.getInteger(MediaFormat.KEY_WIDTH)
+                    }
+                    if (height == 0 && format.containsKey(MediaFormat.KEY_HEIGHT)) {
+                        height = format.getInteger(MediaFormat.KEY_HEIGHT)
+                    }
+                    if (format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                        val fps = try {
+                            format.getFloat(MediaFormat.KEY_FRAME_RATE)
+                        } catch (_: Exception) {
+                            format.getInteger(MediaFormat.KEY_FRAME_RATE).toFloat()
+                        }
+                        if (fps > 0f) {
+                            videoFpsText = if (fps % 1f == 0f) "${fps.toInt()} FPS"
+                            else String.format(Locale.US, "%.3f FPS", fps)
+                        }
+                    }
+                    if (format.containsKey(MediaFormat.KEY_BIT_RATE)) {
+                        val vBitrate = format.getInteger(MediaFormat.KEY_BIT_RATE).toLong()
+                        if (vBitrate > 0L) videoBitrateText = formatBitrate(vBitrate)
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && format.containsKey(MediaFormat.KEY_COLOR_STANDARD)) {
+                        val std = format.getInteger(MediaFormat.KEY_COLOR_STANDARD)
+                        colorInfoText = when (std) {
+                            MediaFormat.COLOR_STANDARD_BT2020 -> "BT.2020 (HDR / Wide Gamut)"
+                            MediaFormat.COLOR_STANDARD_BT709 -> "BT.709 (HD)"
+                            MediaFormat.COLOR_STANDARD_BT601_PAL,
+                            MediaFormat.COLOR_STANDARD_BT601_NTSC -> "BT.601 (SD)"
+                            else -> "Standard"
+                        }
+                    }
+                } else if (mime.startsWith("audio/")) {
+                    audioCodec = friendlyCodecName(mime)
+                    if (format.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                        val hz = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                        if (hz > 0) audioSampleRateText = String.format(Locale.US, "%.1f kHz", hz / 1000f)
+                    }
+                    if (format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                        val ch = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                        audioChannelsText = when (ch) {
+                            1 -> "1 (Mono)"
+                            2 -> "2 (Stereo)"
+                            6 -> "6 (5.1 Surround)"
+                            else -> "$ch Channels"
+                        }
+                    }
+                    if (format.containsKey(MediaFormat.KEY_BIT_RATE)) {
+                        val aBitrate = format.getInteger(MediaFormat.KEY_BIT_RATE).toLong()
+                        if (aBitrate > 0L) audioBitrateText = formatBitrate(aBitrate)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        } finally {
+            try {
+                extractor.release()
+            } catch (_: Exception) {
+            }
+        }
+
+        if (videoBitrateText == "Unknown" && overallBitrate > 0L) {
+            videoBitrateText = "${formatBitrate(overallBitrate)} (Overall)"
+        }
+
+        val qualityTier = classifyResolutionTier(width, height)
+        val resolutionDisplay = if (width > 0 && height > 0) {
+            "$qualityTier  ($width × $height)"
+        } else {
+            "Unknown"
+        }
+        val aspectRatioText = if (width > 0 && height > 0) {
+            String.format(Locale.US, "%.2f : 1", width.toFloat() / height.toFloat())
+        } else {
+            "Unknown"
+        }
+
+        showMetadataDialog(
+            fileName = fileName,
+            rows = listOf(
+                "GENERAL" to null,
+                "File Size" to fileSizeText,
+                "Container" to mimeContainer,
+                "Duration" to if (durationMs > 0L) formatTime(durationMs) else "Unknown",
+                "Overall Bitrate" to if (overallBitrate > 0L) formatBitrate(overallBitrate) else "Unknown",
+                "VIDEO STREAM" to null,
+                "Quality / Resolution" to resolutionDisplay,
+                "Frame Rate (FPS)" to videoFpsText,
+                "Video Codec" to videoCodec,
+                "Video Bitrate" to videoBitrateText,
+                "Aspect Ratio" to aspectRatioText,
+                "Color Space" to colorInfoText,
+                "Rotation" to "$rotation°",
+                "AUDIO STREAM" to null,
+                "Audio Codec" to audioCodec,
+                "Channels" to audioChannelsText,
+                "Sample Rate" to audioSampleRateText,
+                "Audio Bitrate" to audioBitrateText
+            )
+        )
+    }
+
+    private fun showMetadataDialog(fileName: String, rows: List<Pair<String, String?>>) {
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(18), dp(20), dp(14))
+            background = rounded(Color.rgb(20, 23, 29), 18)
+        }
+
+        val headerTitle = text("VIDEO METADATA", 14f, Color.WHITE, true).apply {
+            letterSpacing = 0.06f
+        }
+        val fileLabel = text(fileName, 11f, Color.rgb(255, 79, 94), true).apply {
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            setPadding(0, dp(4), 0, dp(12))
+        }
+        outer.addView(headerTitle)
+        outer.addView(fileLabel)
+
+        val scrollView = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = true
+        }
+        val listContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        rows.forEach { (key, value) ->
+            if (value == null) {
+                val sectionHeader = text(key, 10f, Color.rgb(120, 235, 165), true).apply {
+                    letterSpacing = 0.08f
+                    setPadding(dp(4), dp(10), 0, dp(4))
+                }
+                listContainer.addView(sectionHeader)
+            } else {
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(8), dp(12), dp(8))
+                    background = rounded(Color.rgb(28, 31, 38), 10)
+                }
+                val kView = text(key, 11f, Color.rgb(162, 168, 180), false)
+                val vView = text(value, 11f, Color.WHITE, true).apply {
+                    gravity = Gravity.END
+                }
+                row.addView(kView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.44f))
+                row.addView(vView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.56f))
+                listContainer.addView(
+                    row,
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        bottomMargin = dp(4)
+                    }
+                )
+            }
+        }
+
+        scrollView.addView(listContainer)
+        val maxScrollHeight = (resources.displayMetrics.heightPixels * 0.52f).toInt()
+        outer.addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxScrollHeight))
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(outer)
+            .create()
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+
+        val closeBtn = pillButton("CLOSE", true).apply {
+            setOnClickListener { dialog.dismiss() }
+        }
+        outer.addView(
+            closeBtn,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)).apply {
+                topMargin = dp(14)
+            }
+        )
+        dialog.show()
+    }
+
+    private fun classifyResolutionTier(width: Int, height: Int): String {
+        if (width <= 0 || height <= 0) return "Unknown"
+        val shortSide = min(width, height)
+        val longSide = maxOf(width, height)
+        return when {
+            shortSide >= 2160 || longSide >= 3840 -> "4K UHD (2160p)"
+            shortSide >= 1440 || longSide >= 2560 -> "2K QHD (1440p)"
+            shortSide >= 1080 || longSide >= 1920 -> "Full HD (1080p)"
+            shortSide >= 720 || longSide >= 1280 -> "HD (720p)"
+            shortSide >= 480 -> "SD (480p)"
+            else -> "${shortSide}p"
+        }
+    }
+
+    private fun friendlyCodecName(mime: String): String = when (mime.lowercase(Locale.US)) {
+        "video/avc" -> "AVC / H.264"
+        "video/hevc" -> "HEVC / H.265"
+        "video/av01" -> "AV1"
+        "video/x-vnd.on2.vp9" -> "VP9"
+        "video/x-vnd.on2.vp8" -> "VP8"
+        "video/mp4v-es" -> "MPEG-4 Visual"
+        "audio/mp4a-latm" -> "AAC"
+        "audio/opus" -> "Opus"
+        "audio/vorbis" -> "Vorbis"
+        "audio/ac3" -> "Dolby AC-3"
+        "audio/eac3" -> "Dolby E-AC-3"
+        "audio/mpeg" -> "MP3"
+        "audio/flac" -> "FLAC"
+        else -> mime
+    }
+
+    private fun formatFileSize(bytes: Long): String {
+        if (bytes <= 0L) return "Unknown"
+        val kb = bytes / 1024.0
+        val mb = kb / 1024.0
+        val gb = mb / 1024.0
+        return when {
+            gb >= 1.0 -> String.format(Locale.US, "%.2f GB", gb)
+            mb >= 1.0 -> String.format(Locale.US, "%.2f MB", mb)
+            else -> String.format(Locale.US, "%.1f KB", kb)
+        }
+    }
+
+    private fun formatBitrate(bps: Long): String {
+        if (bps <= 0L) return "Unknown"
+        val kbps = bps / 1000.0
+        val mbps = kbps / 1000.0
+        return if (mbps >= 1.0) String.format(Locale.US, "%.2f Mbps", mbps)
+        else String.format(Locale.US, "%.0f kbps", kbps)
+    }
+
     private fun buildInterface() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -669,7 +1011,23 @@ class MainActivity : Activity() {
         brandColumn.addView(subtitle)
         header.addView(brandColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
-        val settingsButton = text("⚙", 17f, Color.WHITE, true).apply {
+        // Separate Video Metadata Inspector button
+        val metadataButton = text("ℹ", 16f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            background = rounded(Color.rgb(31, 34, 41), 30)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Inspect video metadata"
+            setOnClickListener { chooseVideoForMetadata() }
+        }
+        header.addView(
+            metadataButton,
+            LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+                rightMargin = dp(6)
+            }
+        )
+
+        val settingsButton = text("⚙", 16f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             background = rounded(Color.rgb(31, 34, 41), 30)
             isClickable = true
@@ -679,15 +1037,15 @@ class MainActivity : Activity() {
         }
         header.addView(
             settingsButton,
-            LinearLayout.LayoutParams(dp(42), dp(42)).apply {
-                rightMargin = dp(8)
+            LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+                rightMargin = dp(6)
             }
         )
 
-        val openButton = pillButton("＋  OPEN VIDEO", true).apply {
+        val openButton = pillButton("＋  OPEN", true).apply {
             setOnClickListener { chooseVideo() }
         }
-        header.addView(openButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)))
+        header.addView(openButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)))
         root.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
         fullscreenChrome.add(header)
 
@@ -762,6 +1120,7 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(7), dp(12), dp(7))
             background = rounded(Color.argb(190, 15, 17, 22), 30)
             elevation = dp(4).toFloat()
+            visibility = if (showModeBadgeEnabled) View.VISIBLE else View.GONE
         }
         val badgeParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1171,8 +1530,15 @@ class MainActivity : Activity() {
     @Deprecated("Uses the Storage Access Framework for broad Android version support")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQUEST_VIDEO || resultCode != RESULT_OK) return
+        if (resultCode != RESULT_OK) return
         val uri = data?.data ?: return
+
+        if (requestCode == REQUEST_METADATA) {
+            inspectAndShowMetadata(uri)
+            return
+        }
+
+        if (requestCode != REQUEST_VIDEO) return
         try {
             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         } catch (_: SecurityException) {
@@ -1211,6 +1577,21 @@ class MainActivity : Activity() {
             } else ""
         } catch (_: Exception) {
             ""
+        } finally {
+            cursor?.close()
+        }
+    }
+
+    private fun queryFileSize(uri: Uri): Long {
+        var cursor: Cursor? = null
+        return try {
+            cursor = contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)
+            if (cursor != null && cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (index >= 0 && !cursor.isNull(index)) cursor.getLong(index) else 0L
+            } else 0L
+        } catch (_: Exception) {
+            0L
         } finally {
             cursor?.close()
         }
@@ -1273,7 +1654,7 @@ class MainActivity : Activity() {
             fullscreenControlsVisible = false
             fullscreenControls.visibility = View.GONE
             fullscreenButton.visibility = View.VISIBLE
-            modeBadge.visibility = View.VISIBLE
+            applyModeBadgeVisibility()
             applyFpsVisibility()
         }
     }
@@ -1282,7 +1663,11 @@ class MainActivity : Activity() {
         fullscreenControlsVisible = visible
         val visibility = if (visible) View.VISIBLE else View.INVISIBLE
         fullscreenControls.visibility = visibility
-        modeBadge.visibility = visibility
+        if (showModeBadgeEnabled) {
+            modeBadge.visibility = visibility
+        } else {
+            modeBadge.visibility = View.GONE
+        }
         if (showFpsEnabled) {
             fpsBadge.visibility = visibility
         } else {
@@ -1361,7 +1746,7 @@ class MainActivity : Activity() {
     private fun pillButton(label: String, accent: Boolean): TextView =
         text(label, 11f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(15), 0, dp(15), 0)
+            setPadding(dp(14), 0, dp(14), 0)
             background = rounded(if (accent) Color.rgb(255, 79, 94) else Color.rgb(31, 34, 41), 30)
             isClickable = true
             isFocusable = true
@@ -1393,8 +1778,10 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_VIDEO = 4102
+        private const val REQUEST_METADATA = 4103
         private const val PREFS_NAME = "panoplay_settings"
         private const val KEY_SHOW_FPS = "show_live_fps"
+        private const val KEY_SHOW_MODE_BADGE = "show_mode_badge"
         private const val KEY_AUDIO_OFFSET_MS = "audio_offset_ms"
     }
 }
