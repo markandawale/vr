@@ -133,9 +133,10 @@ class MainActivity : Activity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        // Prefer hardware MediaCodec decoders with generous buffer for high-bitrate 60fps VR180 streams
+        // Hardware MediaCodec priority with automatic decoder fallback for 1080p AVC & 1440p 60fps AV1
         val renderersFactory = DefaultRenderersFactory(this)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+            .setEnableDecoderFallback(true)
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(15_000, 50_000, 1_500, 3_000)
             .build()
@@ -578,12 +579,10 @@ class MainActivity : Activity() {
         vrSurfaceView.setStereoLayout(stereoLayout)
 
         if (projection == VrVideoSurfaceView.Projection.FLAT) {
-            // Direct zero-copy hardware surface for 2D playback
             vrSurfaceView.visibility = View.GONE
             playerView.visibility = View.VISIBLE
             playerView.player = player
         } else {
-            // Switch output directly to VSync-locked OpenGL VR surface
             playerView.player = null
             playerView.visibility = View.GONE
             vrSurfaceView.visibility = View.VISIBLE
@@ -652,6 +651,12 @@ class MainActivity : Activity() {
         setProjection(VrVideoSurfaceView.Projection.VR180)
         titleView.text = currentVideoName
         placeholder.visibility = View.VISIBLE
+
+        val activeSurface = vrOutputSurface ?: vrSurfaceView.getVideoSurface()
+        if (activeSurface != null && activeSurface.isValid) {
+            player.setVideoSurface(activeSurface)
+        }
+
         player.setMediaItem(MediaItem.fromUri(uri))
         player.prepare()
         player.playWhenReady = true

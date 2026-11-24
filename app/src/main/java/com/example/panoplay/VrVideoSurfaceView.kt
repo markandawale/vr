@@ -26,7 +26,7 @@ import kotlin.math.tan
 
 /**
  * High-framerate, VSync-locked monoscopic viewer for Flat, 180° and 360° VR videos.
- * Uses continuous VSync rendering with atomic frame gating to eliminate fast-motion judder.
+ * Uses continuous VSync rendering with main-looper frame gating to eliminate black screens and fast-motion judder.
  */
 class VrVideoSurfaceView @JvmOverloads constructor(
     context: Context,
@@ -60,12 +60,9 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
     init {
         setEGLContextClientVersion(2)
-        // Request standard 8888 RGBA without unnecessary depth/stencil overhead for faster swapBuffers
         setEGLConfigChooser(8, 8, 8, 8, 0, 0)
         setPreserveEGLContextOnPause(true)
         setRenderer(this)
-        // Continuous mode locks GL swapBuffers directly to hardware VSync (60Hz/90Hz/120Hz),
-        // preventing the frame-coalescing stutter of RENDERMODE_WHEN_DIRTY during fast motion.
         renderMode = RENDERMODE_CONTINUOUSLY
         setBackgroundColor(0xFF050608.toInt())
         isClickable = true
@@ -151,7 +148,6 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         private var projection = Projection.VR180
         private var stereoLayout = StereoLayout.SBS_LEFT
 
-        // Smooth camera interpolation targets
         private var targetYaw = 0f
         private var targetPitch = 0f
         private var currentYaw = 0f
@@ -203,7 +199,8 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
             frameAvailable.set(false)
             val newSt = SurfaceTexture(oesTextureId).apply {
-                setOnFrameAvailableListener(this@VideoRenderer)
+                // Explicitly pass mainHandler because GLThread has no Looper
+                setOnFrameAvailableListener(this@VideoRenderer, mainHandler)
                 if (videoWidth > 0 && videoHeight > 0) {
                     setDefaultBufferSize(videoWidth, videoHeight)
                 }
@@ -226,8 +223,6 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         fun onDrawFrame() {
             val st = surfaceTexture ?: return
 
-            // Only latch a new GPU texture when MediaCodec actually delivered a new frame.
-            // Calling updateTexImage() blindly without a new frame stalls the EGL consumer queue.
             if (frameAvailable.compareAndSet(true, false)) {
                 try {
                     st.updateTexImage()
@@ -258,7 +253,6 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 }
                 Matrix.scaleM(mvpMatrix, 0, sx, sy, 1f)
             } else {
-                // Smooth damping for touch camera movement
                 currentYaw += (targetYaw - currentYaw) * 0.35f
                 currentPitch += (targetPitch - currentPitch) * 0.35f
 
@@ -394,7 +388,6 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 return
             }
 
-            // Optimized 36x72 tessellation: identical visual curvature with half the vertex shader load
             val rows = 36
             val columns = 72
             val startLongitude = if (projection == Projection.VR180) -PI / 2.0 else -PI
