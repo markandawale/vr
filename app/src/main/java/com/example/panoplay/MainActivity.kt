@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
@@ -37,34 +38,94 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import java.util.Locale
+import kotlin.math.abs
 
 private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
     var onVideoTap: (() -> Unit)? = null
     var shouldIgnoreTap: ((Float, Float) -> Boolean)? = null
+    var onBrightnessSwipeStart: (() -> Float)? = null
+    var onBrightnessSwipe: ((Float) -> Unit)? = null
+    var onBrightnessSwipeEnd: (() -> Unit)? = null
+
     private var startX = 0f
     private var startY = 0f
     private var startTime = 0L
+    private var isBrightnessGesture = false
+    private var startBrightness = 0.5f
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        val handled = super.dispatchTouchEvent(event)
+        val slop = 14f * resources.displayMetrics.density
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 startX = event.x
                 startY = event.y
                 startTime = android.os.SystemClock.uptimeMillis()
+                isBrightnessGesture = false
+                return super.dispatchTouchEvent(event)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (event.pointerCount > 1) {
+                    if (isBrightnessGesture) {
+                        isBrightnessGesture = false
+                        onBrightnessSwipeEnd?.invoke()
+                    }
+                    return super.dispatchTouchEvent(event)
+                }
+                val dx = event.x - startX
+                val dy = event.y - startY
+
+                // Trigger brightness swipe only when gesture begins on left 28% of screen and moves vertically
+                if (!isBrightnessGesture &&
+                    startX < width * 0.28f &&
+                    abs(dy) > slop &&
+                    abs(dy) > abs(dx) * 1.35f &&
+                    shouldIgnoreTap?.invoke(startX, startY) != true
+                ) {
+                    isBrightnessGesture = true
+                    startBrightness = onBrightnessSwipeStart?.invoke() ?: 0.5f
+                    // Cancel child pan/drag so camera stays steady while adjusting brightness
+                    val cancelEvent = MotionEvent.obtain(event).apply {
+                        action = MotionEvent.ACTION_CANCEL
+                    }
+                    super.dispatchTouchEvent(cancelEvent)
+                    cancelEvent.recycle()
+                }
+
+                if (isBrightnessGesture) {
+                    val travelHeight = (height * 0.72f).coerceAtLeast(120f)
+                    val delta = -dy / travelHeight
+                    val nextBrightness = (startBrightness + delta).coerceIn(0.01f, 1.0f)
+                    onBrightnessSwipe?.invoke(nextBrightness)
+                    return true
+                }
+                return super.dispatchTouchEvent(event)
             }
             MotionEvent.ACTION_UP -> {
+                if (isBrightnessGesture) {
+                    isBrightnessGesture = false
+                    onBrightnessSwipeEnd?.invoke()
+                    return true
+                }
+                val handled = super.dispatchTouchEvent(event)
                 val dx = event.x - startX
                 val dy = event.y - startY
                 val elapsed = android.os.SystemClock.uptimeMillis() - startTime
-                val slop = 14f * resources.displayMetrics.density
                 if (elapsed < 350L && dx * dx + dy * dy < slop * slop &&
                     shouldIgnoreTap?.invoke(event.x, event.y) != true
                 ) onVideoTap?.invoke()
+                return handled
             }
-            MotionEvent.ACTION_CANCEL -> startTime = 0L
+            MotionEvent.ACTION_CANCEL -> {
+                startTime = 0L
+                if (isBrightnessGesture) {
+                    isBrightnessGesture = false
+                    onBrightnessSwipeEnd?.invoke()
+                    return true
+                }
+                return super.dispatchTouchEvent(event)
+            }
         }
-        return handled
+        return super.dispatchTouchEvent(event)
     }
 }
 
@@ -78,6 +139,7 @@ class MainActivity : Activity() {
 
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
+    private lateinit var brightnessHud: TextView
     private lateinit var titleView: TextView
     private lateinit var playButton: TextView
     private lateinit var seekBar: SeekBar
@@ -96,11 +158,17 @@ class MainActivity : Activity() {
     private var fullscreenControlsVisible = true
     private var normalRootPadding = intArrayOf(0, 0, 0, 0)
     private var normalVideoMargins = intArrayOf(0, 0)
+    private var currentBrightness = -1f
 
     private var isScrubbing = false
     private var currentProjection = VrVideoSurfaceView.Projection.VR180
     private var stereoLayout = VrVideoSurfaceView.StereoLayout.SBS_LEFT
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val hideBrightnessHudRunnable = Runnable {
+        if (::brightnessHud.isInitialized) {
+            brightnessHud.visibility = View.GONE
+        }
+    }
 
     private val progressUpdater = object : Runnable {
         override fun run() {
@@ -134,7 +202,6 @@ class MainActivity : Activity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        // Force pure Hardware MediaCodec (like Ellipse VR) — prevent slow CPU software decoder fallback
         val renderersFactory = DefaultRenderersFactory(this)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
             .setEnableDecoderFallback(true)
@@ -189,6 +256,35 @@ class MainActivity : Activity() {
 
     private var currentVideoName: String = ""
 
+    private fun readInitialBrightness(): Float {
+        if (currentBrightness in 0.01f..1.0f) return currentBrightness
+        val winBrightness = window.attributes.screenBrightness
+        if (winBrightness in 0.01f..1.0f) {
+            currentBrightness = winBrightness
+            return currentBrightness
+        }
+        val sysBrightness = try {
+            Settings.System.getInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS) / 255f
+        } catch (_: Exception) {
+            0.5f
+        }
+        currentBrightness = sysBrightness.coerceIn(0.05f, 1.0f)
+        return currentBrightness
+    }
+
+    private fun applyBrightness(value: Float) {
+        val clamped = value.coerceIn(0.01f, 1.0f)
+        currentBrightness = clamped
+        val lp = window.attributes
+        lp.screenBrightness = clamped
+        window.attributes = lp
+
+        val percent = (clamped * 100f).toInt().coerceIn(1, 100)
+        mainHandler.removeCallbacks(hideBrightnessHudRunnable)
+        brightnessHud.text = "☀  $percent%"
+        brightnessHud.visibility = View.VISIBLE
+    }
+
     private fun buildInterface() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -223,6 +319,12 @@ class MainActivity : Activity() {
         videoFrame = TapDetectFrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             clipToOutline = false
+            onBrightnessSwipeStart = { readInitialBrightness() }
+            onBrightnessSwipe = { level -> applyBrightness(level) }
+            onBrightnessSwipeEnd = {
+                mainHandler.removeCallbacks(hideBrightnessHudRunnable)
+                mainHandler.postDelayed(hideBrightnessHudRunnable, 800L)
+            }
         }
 
         playerView = LayoutInflater.from(this).inflate(R.layout.video_player, videoFrame, false) as PlayerView
@@ -261,6 +363,23 @@ class MainActivity : Activity() {
         videoFrame.addView(
             vrSurfaceView,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
+
+        // Google Files style Brightness HUD Pill
+        brightnessHud = text("☀  50%", 14f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(10), dp(18), dp(10))
+            background = rounded(Color.argb(210, 15, 17, 22), 24)
+            elevation = dp(8).toFloat()
+            visibility = View.GONE
+        }
+        videoFrame.addView(
+            brightnessHud,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            )
         )
 
         val viewBadge = text("180° VIEW · LEFT EYE", 10f, Color.WHITE, true).apply {
@@ -516,7 +635,7 @@ class MainActivity : Activity() {
         root.addView(transport)
         fullscreenChrome.add(transport)
 
-        val hint = text("DRAG TO LOOK AROUND  •  PINCH TO ZOOM  •  MONO / 180° / 360° SBS", 9f, Color.rgb(119, 125, 136), true).apply {
+        val hint = text("DRAG TO LOOK AROUND  •  PINCH TO ZOOM  •  LEFT SWIPE BRIGHTNESS", 9f, Color.rgb(119, 125, 136), true).apply {
             gravity = Gravity.CENTER
             letterSpacing = 0.045f
             setPadding(0, dp(6), 0, dp(2))
@@ -660,7 +779,6 @@ class MainActivity : Activity() {
             player.setVideoSurface(activeSurface)
             startPlayback(uri)
         } else {
-            // Wait until EGL14 SurfaceTexture is created in onVideoSurfaceAvailable
             pendingMediaUri = uri
         }
     }
@@ -803,6 +921,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(progressUpdater)
+        mainHandler.removeCallbacks(hideBrightnessHudRunnable)
         if (::playerView.isInitialized) playerView.player = null
         if (::vrSurfaceView.isInitialized) vrSurfaceView.release()
         if (::player.isInitialized) player.release()
