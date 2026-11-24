@@ -337,8 +337,8 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 }
             }
 
-            val cameraMoving = kotlin.math.abs(targetYaw - currentYaw) > 0.01f ||
-                kotlin.math.abs(targetPitch - currentPitch) > 0.01f
+            val cameraMoving = kotlin.math.abs(targetYaw - currentYaw) > 0.002f ||
+                kotlin.math.abs(targetPitch - currentPitch) > 0.002f
 
             // Draw on every new decoded video frame, camera pan, or initial surface clear
             if (!updatedFrame && !cameraMoving && firstFrameDrawn) {
@@ -376,8 +376,8 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 }
                 Matrix.scaleM(mvpMatrix, 0, sx, sy, 1f)
             } else {
-                currentYaw += (targetYaw - currentYaw) * 0.45f
-                currentPitch += (targetPitch - currentPitch) * 0.45f
+                currentYaw += (targetYaw - currentYaw) * 0.18f
+                currentPitch += (targetPitch - currentPitch) * 0.18f
 
                 val aspect = viewportWidth.toFloat() / viewportHeight.toFloat()
                 Matrix.perspectiveM(projectionMatrix, 0, fieldOfView, aspect, 0.05f, 50f)
@@ -477,9 +477,10 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
         fun drag(dx: Float, dy: Float, viewWidth: Int) {
             if (projection == Projection.FLAT) return
-            val sensitivity = 165f / viewWidth.coerceAtLeast(1)
+            val zoomScale = (fieldOfView / 80f).coerceIn(0.45f, 1.25f)
+            val sensitivity = (95f / viewWidth.coerceAtLeast(1)) * zoomScale
             targetYaw -= dx * sensitivity
-            targetPitch = (targetPitch - dy * sensitivity).coerceIn(-82f, 82f)
+            targetPitch = (targetPitch + dy * sensitivity).coerceIn(-82f, 82f)
             clamp180Bounds()
         }
 
