@@ -573,7 +573,9 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                     StereoLayout.SBS_LEFT -> sourceU * 0.5f
                     StereoLayout.SBS_RIGHT -> 0.5f + sourceU * 0.5f
                 }
-                val v = (1.0 - (latitude + PI / 2.0) / PI).toFloat()
+                // SurfaceTexture's uTexMatrix already flips Y from top-down to OpenGL bottom-up,
+                // so v must map bottom (-PI/2) -> 0.0 and top (+PI/2) -> 1.0.
+                val v = ((latitude + PI / 2.0) / PI).toFloat()
                 tex[tIdx++] = u
                 tex[tIdx++] = v
             }
