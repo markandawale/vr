@@ -9,7 +9,6 @@ import android.database.Cursor
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -28,6 +27,7 @@ import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
@@ -54,16 +54,10 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
     var onBrightnessSwipe: ((Float) -> Unit)? = null
     var onBrightnessSwipeEnd: (() -> Unit)? = null
 
-    var onVolumeSwipeStart: (() -> Float)? = null
-    var onVolumeSwipe: ((Float) -> Unit)? = null
-    var onVolumeSwipeEnd: (() -> Unit)? = null
-
     private var startX = 0f
     private var startY = 0f
-    private var activeGesture = GestureMode.NONE
-    private var startLevel = 0.5f
-
-    private enum class GestureMode { NONE, BRIGHTNESS, VOLUME }
+    private var isBrightnessGesture = false
+    private var startBrightness = 0.5f
 
     private val gestureDetector = GestureDetector(
         context,
@@ -94,71 +88,54 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
             MotionEvent.ACTION_DOWN -> {
                 startX = event.x
                 startY = event.y
-                activeGesture = GestureMode.NONE
+                isBrightnessGesture = false
                 return super.dispatchTouchEvent(event)
             }
             MotionEvent.ACTION_MOVE -> {
                 if (event.pointerCount > 1) {
-                    finishVerticalGesture()
+                    if (isBrightnessGesture) {
+                        isBrightnessGesture = false
+                        onBrightnessSwipeEnd?.invoke()
+                    }
                     return super.dispatchTouchEvent(event)
                 }
                 val dx = event.x - startX
                 val dy = event.y - startY
 
-                if (activeGesture == GestureMode.NONE &&
+                // Left 28% vertical swipe controls brightness
+                if (!isBrightnessGesture &&
+                    startX < width * 0.28f &&
                     abs(dy) > slop &&
                     abs(dy) > abs(dx) * 1.35f &&
                     shouldIgnoreTap?.invoke(startX, startY) != true
                 ) {
-                    if (startX < width * 0.28f) {
-                        activeGesture = GestureMode.BRIGHTNESS
-                        startLevel = onBrightnessSwipeStart?.invoke() ?: 0.5f
-                        cancelChildTouch(event)
-                    } else if (startX > width * 0.72f) {
-                        activeGesture = GestureMode.VOLUME
-                        startLevel = onVolumeSwipeStart?.invoke() ?: 0.5f
-                        cancelChildTouch(event)
+                    isBrightnessGesture = true
+                    startBrightness = onBrightnessSwipeStart?.invoke() ?: 0.5f
+                    val cancelEvent = MotionEvent.obtain(event).apply {
+                        action = MotionEvent.ACTION_CANCEL
                     }
+                    super.dispatchTouchEvent(cancelEvent)
+                    cancelEvent.recycle()
                 }
 
-                if (activeGesture != GestureMode.NONE) {
+                if (isBrightnessGesture) {
                     val travelHeight = (height * 0.72f).coerceAtLeast(120f)
                     val delta = -dy / travelHeight
-                    if (activeGesture == GestureMode.BRIGHTNESS) {
-                        onBrightnessSwipe?.invoke((startLevel + delta).coerceIn(0.01f, 1.0f))
-                    } else if (activeGesture == GestureMode.VOLUME) {
-                        onVolumeSwipe?.invoke((startLevel + delta).coerceIn(0.0f, 1.0f))
-                    }
+                    onBrightnessSwipe?.invoke((startBrightness + delta).coerceIn(0.01f, 1.0f))
                     return true
                 }
                 return super.dispatchTouchEvent(event)
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (activeGesture != GestureMode.NONE) {
-                    finishVerticalGesture()
+                if (isBrightnessGesture) {
+                    isBrightnessGesture = false
+                    onBrightnessSwipeEnd?.invoke()
                     return true
                 }
                 return super.dispatchTouchEvent(event)
             }
         }
         return super.dispatchTouchEvent(event)
-    }
-
-    private fun cancelChildTouch(event: MotionEvent) {
-        val cancelEvent = MotionEvent.obtain(event).apply {
-            action = MotionEvent.ACTION_CANCEL
-        }
-        super.dispatchTouchEvent(cancelEvent)
-        cancelEvent.recycle()
-    }
-
-    private fun finishVerticalGesture() {
-        when (activeGesture) {
-            GestureMode.BRIGHTNESS -> onBrightnessSwipeEnd?.invoke()
-            GestureMode.VOLUME -> onVolumeSwipeEnd?.invoke()
-            GestureMode.NONE -> {}
-        }
-        activeGesture = GestureMode.NONE
     }
 }
 
@@ -202,7 +179,7 @@ class MainActivity : Activity() {
     private var showFpsEnabled = true
 
     private val speedSteps = floatArrayOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
-    private var speedIndex = 2
+    private var currentSpeed = 1.0f
     private var isLandscapeLocked = false
 
     private var isScrubbing = false
@@ -213,10 +190,6 @@ class MainActivity : Activity() {
         if (::centerHud.isInitialized) {
             centerHud.visibility = View.GONE
         }
-    }
-
-    private val audioManager by lazy {
-        getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
 
     private val progressUpdater = object : Runnable {
@@ -401,30 +374,27 @@ class MainActivity : Activity() {
         showCenterHud("☀  $percent%")
     }
 
-    private fun readCurrentVolumeNormalized(): Float {
-        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-        val cur = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-        return (cur.toFloat() / max.toFloat()).coerceIn(0f, 1f)
-    }
+    private fun formatSpeedLabel(speed: Float): String =
+        if (speed == 1.0f || speed == 2.0f) "${speed.toInt()}.0x" else "${speed}x"
 
-    private fun applyVolumeNormalized(value: Float) {
-        val clamped = value.coerceIn(0f, 1f)
-        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-        val targetIndex = (clamped * max + 0.5f).toInt().coerceIn(0, max)
-        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetIndex, 0)
-        val percent = ((targetIndex.toFloat() / max.toFloat()) * 100f).toInt().coerceIn(0, 100)
-        val icon = if (targetIndex == 0) "🔇" else "🔊"
-        showCenterHud("$icon  $percent%")
-    }
-
-    private fun cyclePlaybackSpeed() {
-        speedIndex = (speedIndex + 1) % speedSteps.size
-        val speed = speedSteps[speedIndex]
-        player.playbackParameters = PlaybackParameters(speed)
-        val label = if (speed == 1.0f || speed == 2.0f) "${speed.toInt()}.0x" else "${speed}x"
-        speedButton.text = label
-        if (::overlaySpeedButton.isInitialized) overlaySpeedButton.text = label
-        showCenterHud("⚡  $label", 800L)
+    private fun showSpeedPicker(anchor: View) {
+        val popup = PopupMenu(this, anchor)
+        speedSteps.forEachIndexed { index, speed ->
+            val label = formatSpeedLabel(speed)
+            val title = if (speed == currentSpeed) "✓  $label" else "     $label"
+            popup.menu.add(0, index, index, title)
+        }
+        popup.setOnMenuItemClickListener { item ->
+            val selected = speedSteps.getOrNull(item.itemId) ?: return@setOnMenuItemClickListener false
+            currentSpeed = selected
+            player.playbackParameters = PlaybackParameters(selected)
+            val label = formatSpeedLabel(selected)
+            speedButton.text = label
+            if (::overlaySpeedButton.isInitialized) overlaySpeedButton.text = label
+            showCenterHud("⚡  $label", 800L)
+            true
+        }
+        popup.show()
     }
 
     private fun toggleOrientationLock() {
@@ -439,25 +409,15 @@ class MainActivity : Activity() {
     }
 
     private fun handleDoubleTap(x: Float) {
+        if (!isFullscreen) return
         val w = videoFrame.width.coerceAtLeast(1)
-        if (isFullscreen && x < w * 0.28f) {
+        if (x < w * 0.28f) {
             player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L))
             showCenterHud("↶  10s", 750L)
-        } else if (isFullscreen && x > w * 0.72f) {
+        } else if (x > w * 0.72f) {
             val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
             player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
             showCenterHud("10s  ↷", 750L)
-        } else if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
-            vrSurfaceView.resetView()
-            showCenterHud("⊙  CENTERED", 750L)
-        } else {
-            if (player.isPlaying) {
-                player.pause()
-                showCenterHud("Ⅱ  PAUSED", 700L)
-            } else {
-                player.play()
-                showCenterHud("▶  PLAYING", 700L)
-            }
         }
     }
 
@@ -580,12 +540,6 @@ class MainActivity : Activity() {
                 mainHandler.removeCallbacks(hideCenterHudRunnable)
                 mainHandler.postDelayed(hideCenterHudRunnable, 800L)
             }
-            onVolumeSwipeStart = { readCurrentVolumeNormalized() }
-            onVolumeSwipe = { level -> applyVolumeNormalized(level) }
-            onVolumeSwipeEnd = {
-                mainHandler.removeCallbacks(hideCenterHudRunnable)
-                mainHandler.postDelayed(hideCenterHudRunnable, 800L)
-            }
         }
 
         playerView = LayoutInflater.from(this).inflate(R.layout.video_player, videoFrame, false) as PlayerView
@@ -626,7 +580,7 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
 
-        // Translucent HUD for Brightness, Volume, Speed, Rotation & Re-Center feedback
+        // Translucent HUD for Brightness, Speed, Rotation & Seek feedback
         centerHud = text("☀  50%", 14f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(18), dp(10), dp(18), dp(10))
@@ -712,7 +666,7 @@ class MainActivity : Activity() {
             }
         }
         overlaySpeedButton = transportButton("1.0x").apply {
-            setOnClickListener { cyclePlaybackSpeed() }
+            setOnClickListener { showSpeedPicker(this) }
         }
         overlayRotateButton = transportButton("↻").apply {
             setOnClickListener { toggleOrientationLock() }
@@ -843,21 +797,11 @@ class MainActivity : Activity() {
             setPadding(0, 0, 0, dp(6))
         }
         monoChip = stereoChip("MONO", VrVideoSurfaceView.StereoLayout.MONO)
-        leftEyeChip = stereoChip("SBS L", VrVideoSurfaceView.StereoLayout.SBS_LEFT)
-        rightEyeChip = stereoChip("SBS R", VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
-        ouTopChip = stereoChip("OU TOP", VrVideoSurfaceView.StereoLayout.OU_TOP)
-        ouBottomChip = stereoChip("OU BOT", VrVideoSurfaceView.StereoLayout.OU_BOTTOM)
-
-        val stereoChips = listOf(monoChip, leftEyeChip, rightEyeChip, ouTopChip, ouBottomChip)
-        stereoChips.forEachIndexed { idx, chip ->
-            stereoRow.addView(
-                chip,
-                LinearLayout.LayoutParams(0, dp(34), 1f).apply {
-                    if (idx > 0) leftMargin = dp(3)
-                    if (idx < stereoChips.lastIndex) rightMargin = dp(3)
-                }
-            )
-        }
+        leftEyeChip = stereoChip("SBS LEFT", VrVideoSurfaceView.StereoLayout.SBS_LEFT)
+        rightEyeChip = stereoChip("SBS RIGHT", VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
+        stereoRow.addView(monoChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { rightMargin = dp(4) })
+        stereoRow.addView(leftEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
+        stereoRow.addView(rightEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4) })
         root.addView(stereoRow)
         fullscreenChrome.add(stereoRow)
 
@@ -905,7 +849,7 @@ class MainActivity : Activity() {
             setPadding(0, dp(4), 0, dp(5))
         }
         speedButton = transportButton("1.0x").apply {
-            setOnClickListener { cyclePlaybackSpeed() }
+            setOnClickListener { showSpeedPicker(this) }
         }
         val backButton = transportButton("↶ 10").apply {
             setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
@@ -948,7 +892,7 @@ class MainActivity : Activity() {
         root.addView(transport)
         fullscreenChrome.add(transport)
 
-        val hint = text("DOUBLE-TAP CENTER RECENTER  •  L BRIGHTNESS  •  R VOLUME", 9f, Color.rgb(119, 125, 136), true).apply {
+        val hint = text("DRAG TO LOOK AROUND  •  PINCH TO ZOOM  •  LEFT SWIPE BRIGHTNESS", 9f, Color.rgb(119, 125, 136), true).apply {
             gravity = Gravity.CENTER
             letterSpacing = 0.04f
             setPadding(0, dp(6), 0, dp(2))
@@ -990,11 +934,9 @@ class MainActivity : Activity() {
     private lateinit var monoChip: TextView
     private lateinit var leftEyeChip: TextView
     private lateinit var rightEyeChip: TextView
-    private lateinit var ouTopChip: TextView
-    private lateinit var ouBottomChip: TextView
 
     private fun stereoChip(label: String, layout: VrVideoSurfaceView.StereoLayout): TextView =
-        text(label, 9.5f, Color.WHITE, true).apply {
+        text(label, 10f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setOnClickListener {
                 stereoLayout = layout
@@ -1043,8 +985,6 @@ class MainActivity : Activity() {
                 VrVideoSurfaceView.StereoLayout.MONO -> "MONO"
                 VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "LEFT EYE"
                 VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "RIGHT EYE"
-                VrVideoSurfaceView.StereoLayout.OU_TOP -> "TOP EYE"
-                VrVideoSurfaceView.StereoLayout.OU_BOTTOM -> "BOTTOM EYE"
             }
             "$projectionLabel · $eyeLabel"
         } else {
@@ -1063,8 +1003,6 @@ class MainActivity : Activity() {
         style(monoChip, stereoLayout == VrVideoSurfaceView.StereoLayout.MONO)
         style(leftEyeChip, stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT)
         style(rightEyeChip, stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
-        style(ouTopChip, stereoLayout == VrVideoSurfaceView.StereoLayout.OU_TOP)
-        style(ouBottomChip, stereoLayout == VrVideoSurfaceView.StereoLayout.OU_BOTTOM)
     }
 
     private fun chooseVideo() {
