@@ -74,7 +74,6 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
                 val dx = event.x - startX
                 val dy = event.y - startY
 
-                // Trigger brightness swipe only when gesture begins on left 28% of screen and moves vertically
                 if (!isBrightnessGesture &&
                     startX < width * 0.28f &&
                     abs(dy) > slop &&
@@ -83,7 +82,6 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
                 ) {
                     isBrightnessGesture = true
                     startBrightness = onBrightnessSwipeStart?.invoke() ?: 0.5f
-                    // Cancel child pan/drag so camera stays steady while adjusting brightness
                     val cancelEvent = MotionEvent.obtain(event).apply {
                         action = MotionEvent.ACTION_CANCEL
                     }
@@ -140,6 +138,7 @@ class MainActivity : Activity() {
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var brightnessHud: TextView
+    private lateinit var fpsBadge: TextView
     private lateinit var titleView: TextView
     private lateinit var playButton: TextView
     private lateinit var seekBar: SeekBar
@@ -159,6 +158,8 @@ class MainActivity : Activity() {
     private var normalRootPadding = intArrayOf(0, 0, 0, 0)
     private var normalVideoMargins = intArrayOf(0, 0)
     private var currentBrightness = -1f
+    private var lastRenderedFrames = 0
+    private var lastFpsCheckTimeMs = 0L
 
     private var isScrubbing = false
     private var currentProjection = VrVideoSurfaceView.Projection.VR180
@@ -188,9 +189,51 @@ class MainActivity : Activity() {
                     fullscreenCurrentTime.text = formatTime(position)
                     fullscreenDuration.text = formatTime(duration)
                 }
+                updateLiveFpsBadge()
             }
             mainHandler.postDelayed(this, 500L)
         }
+    }
+
+    private fun updateLiveFpsBadge() {
+        if (!::fpsBadge.isInitialized) return
+        val now = android.os.SystemClock.uptimeMillis()
+        var liveFps = if (currentProjection != VrVideoSurfaceView.Projection.FLAT && ::vrSurfaceView.isInitialized) {
+            vrSurfaceView.getMeasuredVideoFps()
+        } else {
+            0
+        }
+
+        // Fallback to ExoPlayer decoder counter (works in FLAT 2D and initial startup)
+        val counters = player.videoDecoderCounters
+        if (counters != null) {
+            counters.ensureUpdated()
+            val totalRendered = counters.renderedOutputBufferCount
+            if (lastFpsCheckTimeMs > 0L) {
+                val elapsed = now - lastFpsCheckTimeMs
+                if (elapsed >= 500L) {
+                    val deltaFrames = (totalRendered - lastRenderedFrames).coerceAtLeast(0)
+                    val decoderFps = ((deltaFrames * 1000f) / elapsed + 0.5f).toInt()
+                    if (liveFps == 0 || currentProjection == VrVideoSurfaceView.Projection.FLAT) {
+                        liveFps = decoderFps
+                    }
+                    lastRenderedFrames = totalRendered
+                    lastFpsCheckTimeMs = now
+                }
+            } else {
+                lastRenderedFrames = totalRendered
+                lastFpsCheckTimeMs = now
+            }
+        }
+
+        if (liveFps <= 0 && player.isPlaying) {
+            val formatFps = player.videoFormat?.frameRate ?: -1f
+            if (formatFps > 0f) {
+                liveFps = (formatFps + 0.5f).toInt()
+            }
+        }
+
+        fpsBadge.text = if (player.isPlaying && liveFps > 0) "$liveFps FPS" else "-- FPS"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -219,6 +262,9 @@ class MainActivity : Activity() {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 playButton.text = if (isPlaying) "Ⅱ" else "▶"
                 if (::overlayPlayButton.isInitialized) overlayPlayButton.text = if (isPlaying) "Ⅱ" else "▶"
+                if (!isPlaying && ::fpsBadge.isInitialized) {
+                    fpsBadge.text = "-- FPS"
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -228,6 +274,7 @@ class MainActivity : Activity() {
                 }
                 if (playbackState == Player.STATE_ENDED) {
                     playButton.text = "▶"
+                    if (::fpsBadge.isInitialized) fpsBadge.text = "-- FPS"
                 }
             }
 
@@ -365,7 +412,6 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
 
-        // Google Files style Brightness HUD Pill
         brightnessHud = text("☀  50%", 14f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(18), dp(10), dp(18), dp(10))
@@ -396,6 +442,21 @@ class MainActivity : Activity() {
         }
         videoFrame.addView(viewBadge, badgeParams)
         modeBadge = viewBadge
+
+        // Live FPS badge directly opposite modeBadge on the top-right corner
+        fpsBadge = text("-- FPS", 10f, Color.rgb(120, 235, 165), true).apply {
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = rounded(Color.argb(190, 15, 17, 22), 30)
+            elevation = dp(4).toFloat()
+        }
+        val fpsBadgeParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.END
+        ).apply {
+            setMargins(0, dp(12), dp(12), 0)
+        }
+        videoFrame.addView(fpsBadge, fpsBadgeParams)
 
         fullscreenButton = text("⛶", 22f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
@@ -784,6 +845,8 @@ class MainActivity : Activity() {
     }
 
     private fun startPlayback(uri: Uri) {
+        lastRenderedFrames = 0
+        lastFpsCheckTimeMs = 0L
         player.setMediaItem(MediaItem.fromUri(uri))
         player.prepare()
         player.playWhenReady = true
@@ -858,6 +921,7 @@ class MainActivity : Activity() {
             fullscreenControls.visibility = View.GONE
             fullscreenButton.visibility = View.VISIBLE
             modeBadge.visibility = View.VISIBLE
+            fpsBadge.visibility = View.VISIBLE
         }
     }
 
@@ -866,6 +930,7 @@ class MainActivity : Activity() {
         val visibility = if (visible) View.VISIBLE else View.INVISIBLE
         fullscreenControls.visibility = visibility
         modeBadge.visibility = visibility
+        fpsBadge.visibility = visibility
     }
 
     @Suppress("DEPRECATION")
