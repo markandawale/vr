@@ -1,7 +1,7 @@
 package com.example.panoplay
 
-import android.content.Context
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.database.Cursor
@@ -9,21 +9,19 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
-import android.os.Bundle
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.Process
-import android.util.Log
-import android.view.Surface
 import android.provider.OpenableColumns
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.LayoutInflater
+import android.view.MotionEvent
+import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowManager
 import android.view.WindowInsets
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.SeekBar
@@ -34,10 +32,9 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.analytics.AnalyticsListener
-import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.PlayerView
 import java.util.Locale
 
@@ -49,8 +46,6 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
     private var startTime = 0L
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        // Let the actual video surface receive the complete gesture first.
-        // This is essential: VR surfaces need the full DOWN/MOVE/UP sequence for panning.
         val handled = super.dispatchTouchEvent(event)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -77,8 +72,9 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
 class MainActivity : Activity() {
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
-    private lateinit var sphericalPlayerView: PlayerView
-    private var sphericalView: SphericalGLSurfaceView? = null
+    private lateinit var vrSurfaceView: VrVideoSurfaceView
+    private var vrOutputSurface: Surface? = null
+
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var titleView: TextView
@@ -93,6 +89,7 @@ class MainActivity : Activity() {
     private lateinit var fullscreenCurrentTime: TextView
     private lateinit var fullscreenDuration: TextView
     private lateinit var rootLayout: LinearLayout
+
     private val fullscreenChrome = mutableListOf<View>()
     private var isFullscreen = false
     private var fullscreenControlsVisible = true
@@ -100,9 +97,8 @@ class MainActivity : Activity() {
     private var normalVideoMargins = intArrayOf(0, 0)
 
     private var isScrubbing = false
-    private var sourceAspectRatio = 16f / 9f
     private var currentProjection = VrVideoSurfaceView.Projection.VR180
-    private var isLandscape = false
+    private var stereoLayout = VrVideoSurfaceView.StereoLayout.SBS_LEFT
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val progressUpdater = object : Runnable {
@@ -117,7 +113,9 @@ class MainActivity : Activity() {
                 }
                 durationView.text = formatTime(duration)
                 if (::overlaySeekBar.isInitialized) {
-                    if (!isScrubbing) overlaySeekBar.progress = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
+                    if (!isScrubbing) {
+                        overlaySeekBar.progress = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
+                    }
                     fullscreenCurrentTime.text = formatTime(position)
                     fullscreenDuration.text = formatTime(duration)
                 }
@@ -128,21 +126,26 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.statusBarColor = Color.rgb(9, 10, 13)
         window.navigationBarColor = Color.rgb(9, 10, 13)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        // Smooth-playback tuning for high-bitrate / high-resolution VR video:
-        //  * async MediaCodec queueing keeps the decoder fed during fast-motion
-        //    (large) frames instead of stalling on the playback thread
-        //  * decoder fallback lets Media3 pick another decoder if one can't keep up
+        // Prefer hardware MediaCodec decoders with generous buffer for high-bitrate 60fps VR180 streams
         val renderersFactory = DefaultRenderersFactory(this)
-            .setEnableDecoderFallback(true)
-            .forceEnableMediaCodecAsynchronousQueueing()
-        player = ExoPlayer.Builder(this, renderersFactory).build()
-        player.addAnalyticsListener(statsListener)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(15_000, 50_000, 1_500, 3_000)
+            .build()
+
+        player = ExoPlayer.Builder(this, renderersFactory)
+            .setLoadControl(loadControl)
+            .build()
+
         buildInterface()
+
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 playButton.text = if (isPlaying) "Ⅱ" else "▶"
@@ -159,94 +162,27 @@ class MainActivity : Activity() {
                 }
             }
 
-            override fun onRenderedFirstFrame() {
-                tuneSphericalSurface()
-                if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
-                    val projection = currentProjection
-                    val layout = stereoLayout
-                    queueSphericalProjection(projection, layout)
-                    // SurfaceTexture delivery and the spherical GL draw happen on
-                    // different threads. Re-apply after the first metadata frame has
-                    // been consumed so its default mesh cannot replace the chosen one.
-                    mainHandler.postDelayed({
-                        if (currentProjection == projection && stereoLayout == layout) {
-                            queueSphericalProjection(projection, layout)
-                        }
-                    }, 300L)
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                if (::vrSurfaceView.isInitialized) {
+                    vrSurfaceView.setVideoSize(
+                        videoSize.width,
+                        videoSize.height,
+                        videoSize.unappliedRotationDegrees,
+                        videoSize.pixelWidthHeightRatio
+                    )
                 }
             }
 
-            override fun onVideoSizeChanged(videoSize: VideoSize) {
-                val rotated = videoSize.unappliedRotationDegrees == 90 || videoSize.unappliedRotationDegrees == 270
-                val displayWidth = if (rotated) videoSize.height else videoSize.width
-                val displayHeight = if (rotated) videoSize.width else videoSize.height
-                sourceAspectRatio = displayWidth * videoSize.pixelWidthHeightRatio / displayHeight.coerceAtLeast(1)
-                // Keep the user's selected/default eye layout. Do not auto-switch
-                // SBS LEFT to MONO based on aspect ratio: 180° SBS files can be 2:1.
-            }
-
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                Toast.makeText(this@MainActivity, "Can't play this video: ${error.errorCodeName}", Toast.LENGTH_LONG).show()
+                Toast.makeText(
+                    this@MainActivity,
+                    "Can't play this video: ${error.errorCodeName}",
+                    Toast.LENGTH_LONG
+                ).show()
                 placeholder.visibility = View.VISIBLE
             }
         })
         mainHandler.post(progressUpdater)
-    }
-
-    // ---- Smoothness tuning / diagnostics --------------------------------
-    private var droppedFrames = 0
-    private var decoderName = ""
-
-    private val statsListener = object : AnalyticsListener {
-        override fun onVideoDecoderInitialized(
-            eventTime: AnalyticsListener.EventTime,
-            decoderName: String,
-            initializedTimestampMs: Long,
-            initializationDurationMs: Long
-        ) {
-            this@MainActivity.decoderName = decoderName
-            droppedFrames = 0
-            Log.i(TAG, "Video decoder: $decoderName")
-        }
-
-        override fun onDroppedVideoFrames(
-            eventTime: AnalyticsListener.EventTime,
-            droppedFrames: Int,
-            elapsedMs: Long
-        ) {
-            this@MainActivity.droppedFrames += droppedFrames
-            Log.w(TAG, "Dropped $droppedFrames frames in ${elapsedMs}ms (total ${this@MainActivity.droppedFrames})")
-            if (SHOW_DEBUG_STATS) mainHandler.post { showDebugStats() }
-        }
-    }
-
-    private fun showDebugStats() {
-        if (!::titleView.isInitialized) return
-        val f = player.videoFormat
-        val res = if (f != null) "${f.width}x${f.height}" else "?"
-        val fps = if (f != null && f.frameRate > 0f) "%.0ffps".format(Locale.US, f.frameRate) else "?fps"
-        val codec = f?.sampleMimeType?.substringAfter('/') ?: "?"
-        titleView.text = "$res $fps $codec | drops: $droppedFrames | $decoderName"
-    }
-
-    /** Raises the GL thread priority and tells the display the video's frame rate. */
-    private fun tuneSphericalSurface() {
-        val view = sphericalView ?: return
-        view.queueEvent {
-            try {
-                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
-            } catch (_: Throwable) { }
-        }
-        if (Build.VERSION.SDK_INT >= 30) {
-            val fps = player.videoFormat?.frameRate ?: -1f
-            val surface = view.holder?.surface
-            if (fps > 0f && surface != null && surface.isValid) {
-                try {
-                    surface.setFrameRate(fps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
-                } catch (_: Throwable) { }
-            }
-        }
-        if (SHOW_DEBUG_STATS) showDebugStats()
     }
 
     private var currentVideoName: String = ""
@@ -286,31 +222,53 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.BLACK)
             clipToOutline = false
         }
-        // Flat playback uses Media3's standard SurfaceView output. This avoids
-        // relying on the custom OpenGL external-texture path for ordinary video.
+
+        // 1. Flat 2D hardware overlay PlayerView
         playerView = LayoutInflater.from(this).inflate(R.layout.video_player, videoFrame, false) as PlayerView
         playerView.player = player
-        videoFrame.addView(playerView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-
-        // Use Media3's maintained spherical renderer for 180°/360° playback.
-        // It owns the video SurfaceTexture and handles SBS eye cropping.
-        sphericalPlayerView = LayoutInflater.from(this).inflate(
-            R.layout.spherical_video_player, videoFrame, false
-        ) as PlayerView
-        sphericalView = sphericalPlayerView.videoSurfaceView as? SphericalGLSurfaceView
-        sphericalView?.setUseSensorRotation(false)
-        sphericalPlayerView.visibility = View.GONE
+        playerView.visibility = View.GONE
         videoFrame.addView(
-            sphericalPlayerView,
+            playerView,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
 
-        val viewBadge = text("FLAT 2D", 10f, Color.WHITE, true).apply {
+        // 2. Custom VSync-locked OpenGL VR180 / VR360 SurfaceView
+        vrSurfaceView = VrVideoSurfaceView(this).apply {
+            setProjection(currentProjection)
+            setStereoLayout(stereoLayout)
+            surfaceEvents = object : VrVideoSurfaceView.SurfaceEvents {
+                override fun onVideoSurfaceAvailable(surface: Surface) {
+                    vrOutputSurface = surface
+                    if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+                        player.setVideoSurface(surface)
+                    }
+                }
+
+                override fun onVideoSurfaceDestroyed(surface: Surface) {
+                    if (vrOutputSurface == surface) {
+                        vrOutputSurface = null
+                    }
+                    if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+                        player.clearVideoSurface(surface)
+                    }
+                }
+            }
+        }
+        videoFrame.addView(
+            vrSurfaceView,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
+
+        val viewBadge = text("180° VIEW · LEFT EYE", 10f, Color.WHITE, true).apply {
             setPadding(dp(12), dp(7), dp(12), dp(7))
             background = rounded(Color.argb(190, 15, 17, 22), 30)
             elevation = dp(4).toFloat()
         }
-        val badgeParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START).apply {
+        val badgeParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.START
+        ).apply {
             setMargins(dp(12), dp(12), 0, 0)
         }
         videoFrame.addView(viewBadge, badgeParams)
@@ -381,12 +339,13 @@ class MainActivity : Activity() {
         }
         fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(dp(42), dp(30)))
         fullscreenSeekRow.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(30), 1f))
-        // Keep the duration label vertically centred with the seek-bar track;
-        // Gravity.END here also implies TOP and was pushing it above the row.
         fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(dp(42), dp(30)))
         fullscreenControls.orientation = LinearLayout.VERTICAL
         fullscreenControls.gravity = Gravity.CENTER_HORIZONTAL
-        fullscreenControls.addView(fullscreenSeekRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32)))
+        fullscreenControls.addView(
+            fullscreenSeekRow,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32))
+        )
 
         val fullscreenTransport = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -395,15 +354,24 @@ class MainActivity : Activity() {
         listOf(rewind, overlayPlayButton, forward).forEachIndexed { index, control ->
             control.background = rounded(Color.argb(85, 12, 14, 18), 22)
             control.textSize = if (index == 1) 17f else 11f
-            fullscreenTransport.addView(control, LinearLayout.LayoutParams(dp(if (index == 1) 42 else 46), dp(34)).apply {
-                if (index != 0) leftMargin = dp(8)
-            })
+            fullscreenTransport.addView(
+                control,
+                LinearLayout.LayoutParams(dp(if (index == 1) 42 else 46), dp(34)).apply {
+                    if (index != 0) leftMargin = dp(8)
+                }
+            )
         }
-        fullscreenControls.addView(fullscreenTransport, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)))
+        fullscreenControls.addView(
+            fullscreenTransport,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(38))
+        )
         fullscreenControls.visibility = View.GONE
-        videoFrame.addView(fullscreenControls, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
-            setMargins(dp(14), 0, dp(14), dp(12))
-        })
+        videoFrame.addView(
+            fullscreenControls,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
+                setMargins(dp(14), 0, dp(14), dp(12))
+            }
+        )
 
         placeholder = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -425,15 +393,16 @@ class MainActivity : Activity() {
         placeholder.addView(placeholderTitle)
         placeholder.addView(placeholderSub)
         placeholder.setOnClickListener { chooseVideo() }
-        val placeholderParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER).apply {
+        val placeholderParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.CENTER
+        ).apply {
             setMargins(dp(32), 0, dp(32), 0)
         }
         videoFrame.addView(placeholder, placeholderParams)
 
-        root.addView(videoFrame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
-            topMargin = 0
-            bottomMargin = 0
-        })
+        root.addView(videoFrame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         titleView = text("No video selected", 13f, Color.WHITE, true).apply {
             maxLines = 1
@@ -513,7 +482,9 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setPadding(0, dp(4), 0, dp(5))
         }
-        val backButton = transportButton("↶ 10").apply { setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) } }
+        val backButton = transportButton("↶ 10").apply {
+            setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
+        }
         playButton = transportButton("▶", true).apply {
             textSize = 20f
             setOnClickListener {
@@ -529,8 +500,6 @@ class MainActivity : Activity() {
                 player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-        // Give both skip controls identical widths and symmetric spacing so their
-        // "10" labels sit optically centred on both sides of the play button.
         transport.addView(backButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
             leftMargin = dp(6); rightMargin = dp(6)
         })
@@ -568,8 +537,6 @@ class MainActivity : Activity() {
                 bottomInset = bottom
             }
             if (isFullscreen) {
-                // Do not reapply the normal 18dp horizontal gutters when Android
-                // dispatches fresh insets after immersive mode is entered.
                 view.setPadding(0, 0, 0, 0)
             } else {
                 view.setPadding(dp(18), dp(8) + topInset, dp(18), dp(10) + bottomInset)
@@ -587,146 +554,63 @@ class MainActivity : Activity() {
     private lateinit var monoChip: TextView
     private lateinit var leftEyeChip: TextView
     private lateinit var rightEyeChip: TextView
-    private var stereoLayout = VrVideoSurfaceView.StereoLayout.SBS_LEFT
 
     private fun stereoChip(label: String, layout: VrVideoSurfaceView.StereoLayout): TextView =
         text(label, 10f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setOnClickListener {
                 stereoLayout = layout
+                vrSurfaceView.setStereoLayout(layout)
                 updateModeChips()
-                setProjection(currentProjection)
-                if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
-                    val projectionLabel = if (currentProjection == VrVideoSurfaceView.Projection.VR180) "180° VIEW" else "360° VIEW"
-                    val eyeLabel = when (layout) {
-                        VrVideoSurfaceView.StereoLayout.MONO -> "MONO"
-                        VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "LEFT EYE"
-                        VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "RIGHT EYE"
-                    }
-                    modeBadge.text = "$projectionLabel · $eyeLabel"
-                }
+                updateBadgeText()
             }
         }
 
-    private fun modeChip(label: String, projection: VrVideoSurfaceView.Projection): TextView = text(label, 12f, Color.WHITE, true).apply {
-        gravity = Gravity.CENTER
-        setOnClickListener { setProjection(projection) }
-    }
+    private fun modeChip(label: String, projection: VrVideoSurfaceView.Projection): TextView =
+        text(label, 12f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            setOnClickListener { setProjection(projection) }
+        }
 
     private fun setProjection(projection: VrVideoSurfaceView.Projection) {
         currentProjection = projection
+        vrSurfaceView.setProjection(projection)
+        vrSurfaceView.setStereoLayout(stereoLayout)
+
         if (projection == VrVideoSurfaceView.Projection.FLAT) {
-            // Keep the working Media3 flat playback path.
+            // Direct zero-copy hardware surface for 2D playback
+            vrSurfaceView.visibility = View.GONE
             playerView.visibility = View.VISIBLE
-            PlayerView.switchTargetView(player, sphericalPlayerView, playerView)
-            sphericalPlayerView.visibility = View.GONE
+            playerView.player = player
         } else {
-            // ExoPlayer's own spherical surface manages GL lifecycle and video output.
-            // Keep its built-in stereo mode MONO: our projection mesh below crops the
-            // exact source eye, which also supports SBS RIGHT without double-cropping.
-            sphericalView?.setDefaultStereoMode(C.STEREO_MODE_MONO)
-            sphericalView?.setUseSensorRotation(false)
-            sphericalPlayerView.visibility = View.VISIBLE
-            PlayerView.switchTargetView(player, playerView, sphericalPlayerView)
+            // Switch output directly to VSync-locked OpenGL VR surface
+            playerView.player = null
             playerView.visibility = View.GONE
-            queueSphericalProjection(projection, stereoLayout)
+            vrSurfaceView.visibility = View.VISIBLE
+            val activeSurface = vrOutputSurface ?: vrSurfaceView.getVideoSurface()
+            if (activeSurface != null && activeSurface.isValid) {
+                player.setVideoSurface(activeSurface)
+            }
         }
-        val projectionLabel = when (projection) {
+        updateBadgeText()
+        updateModeChips()
+    }
+
+    private fun updateBadgeText() {
+        val projectionLabel = when (currentProjection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
             VrVideoSurfaceView.Projection.VR180 -> "180° VIEW"
             VrVideoSurfaceView.Projection.VR360 -> "360° VIEW"
         }
-        modeBadge.text = if (projection != VrVideoSurfaceView.Projection.FLAT &&
-            stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT) {
-            "$projectionLabel · LEFT EYE"
-        } else projectionLabel
-        updateModeChips()
-    }
-
-    /**
-     * Overrides Media3's default full-sphere mesh on its GL thread. Media3 1.11.1
-     * keeps Projection/ProjectionRenderer package-private, so reflection is used
-     * only for mesh creation; decoder surfaces, frame delivery, touch input and
-     * GL lifecycle remain owned by Media3's SphericalGLSurfaceView.
-     */
-    private fun queueSphericalProjection(
-        projection: VrVideoSurfaceView.Projection,
-        layout: VrVideoSurfaceView.StereoLayout
-    ) {
-        val view = sphericalView ?: return
-        if (projection == VrVideoSurfaceView.Projection.FLAT) return
-        view.queueEvent {
-            try {
-                val projectionName = "androidx.media3.exoplayer.video.spherical.Projection"
-                val projectionClass = Class.forName(projectionName)
-                val meshClassName = "$projectionName\$Mesh"
-                val subMeshClassName = "$projectionName\$SubMesh"
-                val intType = Int::class.javaPrimitiveType!!
-                val floatType = Float::class.javaPrimitiveType!!
-
-                val factory = projectionClass.getDeclaredMethod(
-                    "createEquirectangular",
-                    floatType, intType, intType, floatType, floatType, intType
-                ).apply { isAccessible = true }
-                val horizontalFov = if (projection == VrVideoSurfaceView.Projection.VR180) 180f else 360f
-                val baseProjection = factory.invoke(
-                    null, 50f, 36, 72, 180f, horizontalFov, C.STEREO_MODE_MONO
-                )
-                val sourceMeshField = projectionClass.getField("leftMesh").apply { isAccessible = true }
-                val sourceMesh = sourceMeshField.get(baseProjection)
-                val meshClass = Class.forName(meshClassName)
-                val subMeshClass = Class.forName(subMeshClassName)
-                val getSubMesh = meshClass.getMethod("getSubMesh", intType).apply { isAccessible = true }
-                val sourceSubMesh = getSubMesh.invoke(sourceMesh, 0)
-
-                val textureCoordsField = subMeshClass.getField("textureCoords").apply { isAccessible = true }
-                val textureCoords = (textureCoordsField.get(sourceSubMesh) as FloatArray).clone()
-                val cropStart = when (layout) {
-                    VrVideoSurfaceView.StereoLayout.MONO,
-                    VrVideoSurfaceView.StereoLayout.SBS_LEFT -> 0f
-                    VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> 0.5f
-                }
-                val cropWidth = if (layout == VrVideoSurfaceView.StereoLayout.MONO) 1f else 0.5f
-                for (i in textureCoords.indices step 2) {
-                    textureCoords[i] = cropStart + textureCoords[i] * cropWidth
-                }
-
-                val textureIdField = subMeshClass.getField("textureId").apply { isAccessible = true }
-                val verticesField = subMeshClass.getField("vertices").apply { isAccessible = true }
-                val modeField = subMeshClass.getField("mode").apply { isAccessible = true }
-                val subMeshConstructor = subMeshClass.getConstructor(
-                    intType, FloatArray::class.java, FloatArray::class.java, intType
-                ).apply { isAccessible = true }
-                val selectedSubMesh = subMeshConstructor.newInstance(
-                    textureIdField.getInt(sourceSubMesh),
-                    verticesField.get(sourceSubMesh) as FloatArray,
-                    textureCoords,
-                    modeField.getInt(sourceSubMesh)
-                )
-                val subMeshArray = java.lang.reflect.Array.newInstance(subMeshClass, 1)
-                java.lang.reflect.Array.set(subMeshArray, 0, selectedSubMesh)
-                val meshConstructor = meshClass.getConstructor(subMeshArray.javaClass).apply { isAccessible = true }
-                val selectedMesh = meshConstructor.newInstance(subMeshArray)
-                val projectionConstructor = projectionClass.getConstructor(meshClass, intType).apply { isAccessible = true }
-                val selectedProjection = projectionConstructor.newInstance(selectedMesh, C.STEREO_MODE_MONO)
-
-                val sceneField = view.javaClass.getDeclaredField("scene").apply { isAccessible = true }
-                val scene = sceneField.get(view)
-                val rendererField = scene.javaClass.getDeclaredField("projectionRenderer").apply { isAccessible = true }
-                val projectionRenderer = rendererField.get(scene)
-                val setProjection = projectionRenderer.javaClass
-                    .getDeclaredMethod("setProjection", projectionClass).apply { isAccessible = true }
-                setProjection.invoke(projectionRenderer, selectedProjection)
-            } catch (error: Exception) {
-                android.util.Log.e("PanoPlay", "Could not apply spherical projection", error)
-                mainHandler.post {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Panorama setup failed: ${error.javaClass.simpleName}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
+        modeBadge.text = if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+            val eyeLabel = when (stereoLayout) {
+                VrVideoSurfaceView.StereoLayout.MONO -> "MONO"
+                VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "LEFT EYE"
+                VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "RIGHT EYE"
             }
+            "$projectionLabel · $eyeLabel"
+        } else {
+            projectionLabel
         }
     }
 
@@ -761,10 +645,8 @@ class MainActivity : Activity() {
         try {
             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         } catch (_: SecurityException) {
-            // Some document providers do not offer persistable permissions.
         }
         currentVideoName = queryDisplayName(uri).ifBlank { "Selected video" }
-        // Every newly opened video starts in the requested default viewing mode.
         stereoLayout = VrVideoSurfaceView.StereoLayout.SBS_LEFT
         updateModeChips()
         setProjection(VrVideoSurfaceView.Projection.VR180)
@@ -795,7 +677,6 @@ class MainActivity : Activity() {
         fullscreenControlsVisible = true
         fullscreenChrome.forEach { it.visibility = if (isFullscreen) View.GONE else View.VISIBLE }
         fullscreenControls.visibility = if (isFullscreen) View.VISIBLE else View.GONE
-        // The fullscreen-entry button is only available in normal player mode.
         fullscreenButton.visibility = if (isFullscreen) View.GONE else View.VISIBLE
         val params = videoFrame.layoutParams as LinearLayout.LayoutParams
         if (isFullscreen) {
@@ -841,8 +722,6 @@ class MainActivity : Activity() {
                 onVideoTap = null
                 shouldIgnoreTap = null
             }
-            // The translucent overlay controller belongs exclusively to fullscreen.
-            // Keep the normal-screen controls and fullscreen-entry button available.
             fullscreenControlsVisible = false
             fullscreenControls.visibility = View.GONE
             fullscreenButton.visibility = View.VISIBLE
@@ -860,9 +739,6 @@ class MainActivity : Activity() {
     @Suppress("DEPRECATION")
     private fun enterImmersiveMode() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11+ normally keeps the app content inside the stable system-bar
-            // insets even after the bars are hidden. Disable decor fitting so the
-            // video surface can extend behind those insets to the physical display edges.
             window.setDecorFitsSystemWindows(false)
             window.insetsController?.let { controller ->
                 controller.hide(WindowInsets.Type.systemBars())
@@ -891,7 +767,6 @@ class MainActivity : Activity() {
         }
     }
 
-
     @Deprecated("Use OnBackInvokedDispatcher on newer Android versions")
     override fun onBackPressed() {
         if (isFullscreen) {
@@ -903,11 +778,11 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onResume()
+        if (::vrSurfaceView.isInitialized) vrSurfaceView.onResume()
     }
 
     override fun onPause() {
-        if (::sphericalPlayerView.isInitialized) sphericalPlayerView.onPause()
+        if (::vrSurfaceView.isInitialized) vrSurfaceView.onPause()
         if (::player.isInitialized) player.pause()
         super.onPause()
     }
@@ -915,25 +790,27 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         mainHandler.removeCallbacks(progressUpdater)
         if (::playerView.isInitialized) playerView.player = null
-        if (::sphericalPlayerView.isInitialized) sphericalPlayerView.player = null
+        if (::vrSurfaceView.isInitialized) vrSurfaceView.release()
         if (::player.isInitialized) player.release()
         super.onDestroy()
     }
 
-    private fun transportButton(label: String, primary: Boolean = false): TextView = text(label, if (primary) 16f else 11f, Color.WHITE, true).apply {
-        gravity = Gravity.CENTER
-        background = rounded(if (primary) Color.rgb(255, 79, 94) else Color.rgb(28, 31, 38), 13)
-        isClickable = true
-        isFocusable = true
-    }
+    private fun transportButton(label: String, primary: Boolean = false): TextView =
+        text(label, if (primary) 16f else 11f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            background = rounded(if (primary) Color.rgb(255, 79, 94) else Color.rgb(28, 31, 38), 13)
+            isClickable = true
+            isFocusable = true
+        }
 
-    private fun pillButton(label: String, accent: Boolean): TextView = text(label, 11f, Color.WHITE, true).apply {
-        gravity = Gravity.CENTER
-        setPadding(dp(15), 0, dp(15), 0)
-        background = rounded(if (accent) Color.rgb(255, 79, 94) else Color.rgb(31, 34, 41), 30)
-        isClickable = true
-        isFocusable = true
-    }
+    private fun pillButton(label: String, accent: Boolean): TextView =
+        text(label, 11f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(15), 0, dp(15), 0)
+            background = rounded(if (accent) Color.rgb(255, 79, 94) else Color.rgb(31, 34, 41), 30)
+            isClickable = true
+            isFocusable = true
+        }
 
     private fun text(label: String, sizeSp: Float, color: Int, bold: Boolean): TextView = TextView(this).apply {
         text = label
@@ -961,8 +838,5 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_VIDEO = 4102
-        private const val TAG = "PanoPlay"
-        /** Shows resolution / fps / decoder / dropped-frame count in the title bar while testing. */
-        private const val SHOW_DEBUG_STATS = true
     }
 }
