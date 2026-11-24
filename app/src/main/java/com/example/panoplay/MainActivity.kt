@@ -373,7 +373,7 @@ class MainActivity : Activity() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         showFpsEnabled = prefs.getBoolean(KEY_SHOW_FPS, true)
         showModeBadgeEnabled = prefs.getBoolean(KEY_SHOW_MODE_BADGE, true)
-        audioOffsetMs = prefs.getInt(KEY_AUDIO_OFFSET_MS, 0).coerceIn(-500, 500)
+        audioOffsetMs = prefs.getInt(KEY_AUDIO_OFFSET_MS, 0).coerceIn(-1000, 1000)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -630,7 +630,7 @@ class MainActivity : Activity() {
             }
         )
 
-        // 3. TWS Audio Sync Offset (-500ms to +500ms in 25ms steps)
+        // 3. Free-Range 1ms Precision Audio Sync Offset (-1000ms to +1000ms)
         val audioCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(12))
@@ -640,7 +640,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val audioTitle = text("Audio Sync Offset (TWS)", 13f, Color.WHITE, true)
+        val audioTitle = text("Audio Sync Offset", 13f, Color.WHITE, true)
         val audioValueText = text(formatOffsetLabel(audioOffsetMs), 12f, Color.rgb(255, 79, 94), true).apply {
             gravity = Gravity.END
         }
@@ -648,19 +648,20 @@ class MainActivity : Activity() {
         audioHeader.addView(audioValueText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         audioCard.addView(audioHeader)
 
-        val audioHint = text("Use negative (-ms) if Bluetooth TWS audio is behind video", 10f, Color.rgb(152, 158, 170), false).apply {
+        val audioHint = text("Use +ms if audio plays before video  •  -ms if audio is late", 10f, Color.rgb(152, 158, 170), false).apply {
             setPadding(0, dp(3), 0, dp(8))
         }
         audioCard.addView(audioHint)
 
+        // Smooth 1ms resolution: 0..2000 maps directly to -1000ms..+1000ms (center = 1000)
         val audioSeekBar = SeekBar(this).apply {
-            max = 40
-            progress = ((audioOffsetMs + 500) / 25).coerceIn(0, 40)
+            max = 2000
+            progress = (audioOffsetMs + 1000).coerceIn(0, 2000)
             progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(255, 79, 94))
             thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
-                    val newOffset = (value - 20) * 25
+                    val newOffset = value - 1000
                     audioOffsetMs = newOffset
                     audioValueText.text = formatOffsetLabel(newOffset)
                     if (fromUser) {
@@ -677,25 +678,52 @@ class MainActivity : Activity() {
         }
         audioCard.addView(audioSeekBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30)))
 
-        val resetOffsetBtn = text("RESET (0 ms)", 10f, Color.rgb(200, 205, 214), true).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(12), dp(6), dp(12), dp(6))
-            background = rounded(Color.rgb(42, 46, 56), 10)
-            setOnClickListener {
-                audioOffsetMs = 0
-                audioSeekBar.progress = 20
-                audioValueText.text = formatOffsetLabel(0)
-                prefs.edit().putInt(KEY_AUDIO_OFFSET_MS, 0).apply()
-                if (player.playbackState == Player.STATE_READY) {
-                    player.seekTo(player.currentPosition)
-                }
+        fun applyExactOffset(targetMs: Int) {
+            val clamped = targetMs.coerceIn(-1000, 1000)
+            audioOffsetMs = clamped
+            audioSeekBar.progress = clamped + 1000
+            audioValueText.text = formatOffsetLabel(clamped)
+            prefs.edit().putInt(KEY_AUDIO_OFFSET_MS, clamped).apply()
+            if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
+                player.seekTo(player.currentPosition)
             }
         }
+
+        fun stepChip(label: String, deltaMs: Int): TextView = text(label, 10f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            background = rounded(Color.rgb(42, 46, 56), 9)
+            setOnClickListener { applyExactOffset(audioOffsetMs + deltaMs) }
+        }
+
+        val fineTuneRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val minus5 = stepChip("-5ms", -5)
+        val minus1 = stepChip("-1ms", -1)
+        val resetBtn = text("RESET", 10f, Color.rgb(255, 79, 94), true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            background = rounded(Color.rgb(42, 46, 56), 9)
+            setOnClickListener { applyExactOffset(0) }
+        }
+        val plus1 = stepChip("+1ms", 1)
+        val plus5 = stepChip("+5ms", 5)
+
+        val chips = listOf(minus5, minus1, resetBtn, plus1, plus5)
+        chips.forEachIndexed { idx, chip ->
+            fineTuneRow.addView(
+                chip,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    if (idx > 0) leftMargin = dp(4)
+                }
+            )
+        }
         audioCard.addView(
-            resetOffsetBtn,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            fineTuneRow,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(6)
-                gravity = Gravity.END
             }
         )
 
