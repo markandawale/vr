@@ -42,7 +42,13 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.audio.AudioRendererEventListener
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.ui.PlayerView
+import java.util.ArrayList
 import java.util.Locale
 import kotlin.math.abs
 
@@ -141,6 +147,53 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
 }
 
 @OptIn(UnstableApi::class)
+private class OffsetAudioRenderer(
+    context: Context,
+    mediaCodecSelector: MediaCodecSelector,
+    enableDecoderFallback: Boolean,
+    eventHandler: Handler,
+    eventListener: AudioRendererEventListener,
+    audioSink: AudioSink,
+    private val getOffsetUs: () -> Long
+) : MediaCodecAudioRenderer(
+    context,
+    mediaCodecSelector,
+    enableDecoderFallback,
+    eventHandler,
+    eventListener,
+    audioSink
+) {
+    override fun processOutputBuffer(
+        positionUs: Long,
+        elapsedRealtimeUs: Long,
+        codec: androidx.media3.exoplayer.mediacodec.MediaCodecAdapter?,
+        buffer: java.nio.ByteBuffer?,
+        bufferIndex: Int,
+        bufferFlags: Int,
+        sampleCount: Int,
+        bufferPresentationTimeUs: Long,
+        isDecodeOnlyBuffer: Boolean,
+        isLastBuffer: Boolean,
+        format: androidx.media3.common.Format
+    ): Boolean {
+        val shiftedPtsUs = (bufferPresentationTimeUs + getOffsetUs()).coerceAtLeast(0L)
+        return super.processOutputBuffer(
+            positionUs,
+            elapsedRealtimeUs,
+            codec,
+            buffer,
+            bufferIndex,
+            bufferFlags,
+            sampleCount,
+            shiftedPtsUs,
+            isDecodeOnlyBuffer,
+            isLastBuffer,
+            format
+        )
+    }
+}
+
+@OptIn(UnstableApi::class)
 class MainActivity : Activity() {
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
@@ -165,7 +218,6 @@ class MainActivity : Activity() {
     private lateinit var fullscreenDuration: TextView
     private lateinit var rootLayout: LinearLayout
     private lateinit var speedButton: TextView
-    private lateinit var orientationButton: TextView
     private lateinit var overlaySpeedButton: TextView
     private lateinit var overlayRotateButton: TextView
 
@@ -179,9 +231,12 @@ class MainActivity : Activity() {
     private var lastFpsCheckTimeMs = 0L
     private var showFpsEnabled = true
 
+    @Volatile
+    private var audioOffsetMs = 0
+
     private val speedSteps = floatArrayOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
     private var currentSpeed = 1.0f
-    private var isLandscapeLocked = false
+    private var isFullscreenLandscape = false
 
     private var isScrubbing = false
     private var currentProjection = VrVideoSurfaceView.Projection.VR180
@@ -273,6 +328,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         showFpsEnabled = prefs.getBoolean(KEY_SHOW_FPS, true)
+        audioOffsetMs = prefs.getInt(KEY_AUDIO_OFFSET_MS, 0).coerceIn(-500, 500)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -281,7 +337,30 @@ class MainActivity : Activity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        val renderersFactory = DefaultRenderersFactory(this)
+        val renderersFactory = object : DefaultRenderersFactory(this) {
+            override fun buildAudioRenderers(
+                context: Context,
+                extensionRendererMode: Int,
+                mediaCodecSelector: MediaCodecSelector,
+                enableDecoderFallback: Boolean,
+                audioSink: AudioSink,
+                eventHandler: Handler,
+                eventListener: AudioRendererEventListener,
+                out: ArrayList<Renderer>
+            ) {
+                out.add(
+                    OffsetAudioRenderer(
+                        context = context,
+                        mediaCodecSelector = mediaCodecSelector,
+                        enableDecoderFallback = enableDecoderFallback,
+                        eventHandler = eventHandler,
+                        eventListener = eventListener,
+                        audioSink = audioSink,
+                        getOffsetUs = { audioOffsetMs * 1000L }
+                    )
+                )
+            }
+        }
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
             .setEnableDecoderFallback(true)
 
@@ -289,7 +368,6 @@ class MainActivity : Activity() {
             .setBufferDurationsMs(10_000, 30_000, 1_000, 2_000)
             .build()
 
-        // Enables Android Bluetooth/TWS A2DP hardware lip-sync compensation
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
@@ -406,14 +484,15 @@ class MainActivity : Activity() {
         popup.show()
     }
 
-    private fun toggleOrientationLock() {
-        isLandscapeLocked = !isLandscapeLocked
-        requestedOrientation = if (isLandscapeLocked) {
+    private fun toggleFullscreenOrientation() {
+        if (!isFullscreen) return
+        isFullscreenLandscape = !isFullscreenLandscape
+        requestedOrientation = if (isFullscreenLandscape) {
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         } else {
             ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
-        val modeText = if (isLandscapeLocked) "↻  LANDSCAPE" else "↻  PORTRAIT"
+        val modeText = if (isFullscreenLandscape) "↻  LANDSCAPE" else "↻  PORTRAIT"
         showCenterHud(modeText, 850L)
     }
 
@@ -430,10 +509,17 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun formatOffsetLabel(ms: Int): String = when {
+        ms > 0 -> "+$ms ms"
+        ms < 0 -> "$ms ms"
+        else -> "0 ms"
+    }
+
     private fun openSettingsDialog() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(18), dp(22), dp(14))
+            setPadding(dp(22), dp(18), dp(22), dp(16))
             background = rounded(Color.rgb(20, 23, 29), 18)
         }
 
@@ -443,6 +529,7 @@ class MainActivity : Activity() {
         }
         container.addView(dialogTitle)
 
+        // 1. Show Live FPS Toggle
         val fpsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -464,15 +551,90 @@ class MainActivity : Activity() {
             isChecked = showFpsEnabled
             setOnCheckedChangeListener { _, isChecked ->
                 showFpsEnabled = isChecked
-                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .edit()
-                    .putBoolean(KEY_SHOW_FPS, isChecked)
-                    .apply()
+                prefs.edit().putBoolean(KEY_SHOW_FPS, isChecked).apply()
                 applyFpsVisibility()
             }
         }
         fpsRow.addView(fpsSwitch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         container.addView(fpsRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        // 2. TWS / Bluetooth Audio Sync Offset (-500ms to +500ms in 25ms steps)
+        val audioCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = rounded(Color.rgb(28, 31, 38), 14)
+        }
+        val audioHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val audioTitle = text("Audio Sync Offset (TWS)", 13f, Color.WHITE, true)
+        val audioValueText = text(formatOffsetLabel(audioOffsetMs), 12f, Color.rgb(255, 79, 94), true).apply {
+            gravity = Gravity.END
+        }
+        audioHeader.addView(audioTitle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        audioHeader.addView(audioValueText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        audioCard.addView(audioHeader)
+
+        val audioHint = text("Use negative (-ms) if Bluetooth TWS audio lags behind video", 10f, Color.rgb(152, 158, 170), false).apply {
+            setPadding(0, dp(3), 0, dp(8))
+        }
+        audioCard.addView(audioHint)
+
+        // Range: -500ms to +500ms -> 40 steps of 25ms (progress 0..40, center = 20)
+        val audioSeekBar = SeekBar(this).apply {
+            max = 40
+            progress = ((audioOffsetMs + 500) / 25).coerceIn(0, 40)
+            progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(255, 79, 94))
+            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
+                    val newOffset = (value - 20) * 25
+                    audioOffsetMs = newOffset
+                    audioValueText.text = formatOffsetLabel(newOffset)
+                    if (fromUser) {
+                        prefs.edit().putInt(KEY_AUDIO_OFFSET_MS, newOffset).apply()
+                    }
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) {}
+                override fun onStopTrackingTouch(bar: SeekBar?) {
+                    // Nudge seek slightly so ExoPlayer flushes queued audio buffers with new offset immediately
+                    if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
+                        player.seekTo(player.currentPosition)
+                    }
+                }
+            })
+        }
+        audioCard.addView(audioSeekBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30)))
+
+        val resetOffsetBtn = text("RESET (0 ms)", 10f, Color.rgb(200, 205, 214), true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            background = rounded(Color.rgb(42, 46, 56), 10)
+            setOnClickListener {
+                audioOffsetMs = 0
+                audioSeekBar.progress = 20
+                audioValueText.text = formatOffsetLabel(0)
+                prefs.edit().putInt(KEY_AUDIO_OFFSET_MS, 0).apply()
+                if (player.playbackState == Player.STATE_READY) {
+                    player.seekTo(player.currentPosition)
+                }
+            }
+        }
+        audioCard.addView(
+            resetOffsetBtn,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(6)
+                gravity = Gravity.END
+            }
+        )
+
+        container.addView(
+            audioCard,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(10)
+            }
+        )
 
         val dialog = AlertDialog.Builder(this)
             .setView(container)
@@ -485,7 +647,7 @@ class MainActivity : Activity() {
         container.addView(
             closeBtn,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)).apply {
-                topMargin = dp(18)
+                topMargin = dp(16)
             }
         )
 
@@ -677,7 +839,7 @@ class MainActivity : Activity() {
             setOnClickListener { showSpeedPicker(this) }
         }
         overlayRotateButton = transportButton("↻").apply {
-            setOnClickListener { toggleOrientationLock() }
+            setOnClickListener { toggleFullscreenOrientation() }
         }
         overlaySeekBar = SeekBar(this).apply {
             max = 1000
@@ -851,6 +1013,7 @@ class MainActivity : Activity() {
         root.addView(seekRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34)))
         fullscreenChrome.add(seekRow)
 
+        // Normal mode transport bar: Speed, Rewind, Play/Pause, Forward (No rotation button in normal mode)
         val transport = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -877,24 +1040,17 @@ class MainActivity : Activity() {
                 player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-        orientationButton = transportButton("↻").apply {
-            textSize = 15f
-            setOnClickListener { toggleOrientationLock() }
-        }
 
-        transport.addView(speedButton, LinearLayout.LayoutParams(dp(48), dp(46)).apply {
+        transport.addView(speedButton, LinearLayout.LayoutParams(dp(50), dp(46)).apply {
             leftMargin = dp(4); rightMargin = dp(4)
         })
         transport.addView(backButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
             leftMargin = dp(4); rightMargin = dp(4)
         })
-        transport.addView(playButton, LinearLayout.LayoutParams(dp(60), dp(46)).apply {
+        transport.addView(playButton, LinearLayout.LayoutParams(dp(62), dp(46)).apply {
             leftMargin = dp(4); rightMargin = dp(4)
         })
         transport.addView(forwardButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
-            leftMargin = dp(4); rightMargin = dp(4)
-        })
-        transport.addView(orientationButton, LinearLayout.LayoutParams(dp(44), dp(46)).apply {
             leftMargin = dp(4); rightMargin = dp(4)
         })
         root.addView(transport)
@@ -1094,6 +1250,11 @@ class MainActivity : Activity() {
             window.setBackgroundDrawableResource(android.R.color.black)
             enterImmersiveMode()
         } else {
+            // Always return to clean Portrait layout when exiting fullscreen
+            if (isFullscreenLandscape) {
+                isFullscreenLandscape = false
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
             params.topMargin = normalVideoMargins[0]
             params.bottomMargin = normalVideoMargins[1]
             params.height = 0
@@ -1246,5 +1407,6 @@ class MainActivity : Activity() {
         private const val REQUEST_VIDEO = 4102
         private const val PREFS_NAME = "panoplay_settings"
         private const val KEY_SHOW_FPS = "show_live_fps"
+        private const val KEY_AUDIO_OFFSET_MS = "audio_offset_ms"
     }
 }
