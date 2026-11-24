@@ -6,7 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.database.Cursor
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaExtractor
@@ -56,6 +59,119 @@ import java.util.ArrayList
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
+
+/**
+ * Custom sleek cinema-style seek slider for fullscreen mode.
+ * Expands track height and thumb glow when touched for effortless precision scrubbing.
+ */
+private class CinemaSeekBar(context: Context) : View(context) {
+    var max: Int = 1000
+    var progress: Int = 0
+        set(value) {
+            val clamped = value.coerceIn(0, max)
+            if (field != clamped) {
+                field = clamped
+                invalidate()
+            }
+        }
+
+    var onStartScrub: (() -> Unit)? = null
+    var onProgressScrub: ((Int) -> Unit)? = null
+    var onStopScrub: ((Int) -> Unit)? = null
+
+    private var isDragging = false
+    private val density = resources.displayMetrics.density
+
+    private val trackBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(72, 255, 255, 255)
+        style = Paint.Style.FILL
+    }
+    private val trackFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(255, 79, 94)
+        style = Paint.Style.FILL
+    }
+    private val thumbGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(75, 255, 79, 94)
+        style = Paint.Style.FILL
+    }
+    private val thumbCorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+    }
+    private val trackRect = RectF()
+    private val fillRect = RectF()
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+
+        val sidePad = 10f * density
+        val usableWidth = (w - sidePad * 2f).coerceAtLeast(1f)
+        val centerY = h * 0.5f
+
+        val trackHeight = (if (isDragging) 6f else 3.2f) * density
+        val halfTrack = trackHeight * 0.5f
+        val radius = halfTrack
+
+        val fraction = if (max > 0) (progress.toFloat() / max.toFloat()).coerceIn(0f, 1f) else 0f
+        val thumbX = sidePad + usableWidth * fraction
+
+        trackRect.set(sidePad, centerY - halfTrack, w - sidePad, centerY + halfTrack)
+        canvas.drawRoundRect(trackRect, radius, radius, trackBgPaint)
+
+        fillRect.set(sidePad, centerY - halfTrack, thumbX, centerY + halfTrack)
+        canvas.drawRoundRect(fillRect, radius, radius, trackFillPaint)
+
+        if (isDragging) {
+            canvas.drawCircle(thumbX, centerY, 13f * density, thumbGlowPaint)
+        }
+        val thumbRadius = (if (isDragging) 7.5f else 5.5f) * density
+        canvas.drawCircle(thumbX, centerY, thumbRadius, thumbCorePaint)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val sidePad = 10f * density
+        val usableWidth = (width - sidePad * 2f).coerceAtLeast(1f)
+
+        fun computeProgress(rawX: Float): Int {
+            val ratio = ((rawX - sidePad) / usableWidth).coerceIn(0f, 1f)
+            return (ratio * max + 0.5f).toInt().coerceIn(0, max)
+        }
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                parent?.requestDisallowInterceptTouchEvent(true)
+                isDragging = true
+                progress = computeProgress(event.x)
+                onStartScrub?.invoke()
+                onProgressScrub?.invoke(progress)
+                invalidate()
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (isDragging) {
+                    progress = computeProgress(event.x)
+                    onProgressScrub?.invoke(progress)
+                    invalidate()
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (isDragging) {
+                    progress = computeProgress(event.x)
+                    isDragging = false
+                    onStopScrub?.invoke(progress)
+                    invalidate()
+                }
+                parent?.requestDisallowInterceptTouchEvent(false)
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
+    }
+}
 
 private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
     var onVideoSingleTap: (() -> Unit)? = null
@@ -246,8 +362,9 @@ class MainActivity : Activity() {
     private lateinit var durationView: TextView
     private lateinit var fullscreenButton: TextView
     private lateinit var overlayPlayButton: TextView
-    private lateinit var overlaySeekBar: SeekBar
+    private lateinit var overlaySeekBar: CinemaSeekBar
     private lateinit var fullscreenControls: LinearLayout
+    private lateinit var fullscreenTitleView: TextView
     private lateinit var fullscreenCurrentTime: TextView
     private lateinit var fullscreenDuration: TextView
     private lateinit var rootLayout: LinearLayout
@@ -288,24 +405,25 @@ class MainActivity : Activity() {
             if (::player.isInitialized) {
                 val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
                 val position = player.currentPosition.coerceAtLeast(0L)
+                val progressPermille = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
                 if (!isScrubbing) {
                     seekBar.max = 1000
-                    seekBar.progress = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
+                    seekBar.progress = progressPermille
                     currentTimeView.text = formatTime(position)
                 }
                 durationView.text = formatTime(duration)
                 if (::overlaySeekBar.isInitialized) {
                     if (!isScrubbing) {
-                        overlaySeekBar.progress = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
+                        overlaySeekBar.progress = progressPermille
+                        fullscreenCurrentTime.text = formatTime(position)
                     }
-                    fullscreenCurrentTime.text = formatTime(position)
                     fullscreenDuration.text = formatTime(duration)
                 }
                 if (showFpsEnabled) {
                     updateLiveFpsBadge()
                 }
             }
-            mainHandler.postDelayed(this, 500L)
+            mainHandler.postDelayed(this, 250L)
         }
     }
 
@@ -430,10 +548,13 @@ class MainActivity : Activity() {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) {
                     placeholder.visibility = View.GONE
-                    titleView.text = currentVideoName.ifBlank { "Now playing" }
+                    val resolvedName = currentVideoName.ifBlank { "Now playing" }
+                    titleView.text = resolvedName
+                    if (::fullscreenTitleView.isInitialized) fullscreenTitleView.text = resolvedName
                 }
                 if (playbackState == Player.STATE_ENDED) {
                     playButton.text = "▶"
+                    if (::overlayPlayButton.isInitialized) overlayPlayButton.text = "▶"
                     if (::fpsBadge.isInitialized) fpsBadge.text = "-- FPS"
                 }
             }
@@ -596,7 +717,7 @@ class MainActivity : Activity() {
         fpsRow.addView(fpsSwitch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         container.addView(fpsRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        // 2. Show View Mode Badge Toggle (Top-Left 180°/360° Eye Badge)
+        // 2. Show View Mode Badge Toggle
         val modeBadgeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -653,7 +774,6 @@ class MainActivity : Activity() {
         }
         audioCard.addView(audioHint)
 
-        // Smooth 1ms resolution: 0..2000 maps directly to -1000ms..+1000ms (center = 1000)
         val audioSeekBar = SeekBar(this).apply {
             max = 2000
             progress = (audioOffsetMs + 1000).coerceIn(0, 2000)
@@ -1218,13 +1338,87 @@ class MainActivity : Activity() {
         }
         videoFrame.addView(fullscreenButton, fullscreenParams)
 
+        // Redesigned Cinema Floating Fullscreen Controls Dock
         fullscreenControls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = GradientDrawable().apply {
+                setColor(Color.argb(208, 12, 14, 19))
+                cornerRadius = dp(20).toFloat()
+                setStroke(dp(1), Color.argb(38, 255, 255, 255))
+            }
+            elevation = dp(6).toFloat()
+        }
+
+        // Top row inside dock: Video title + Exit Fullscreen button
+        val dockTopRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(4), dp(8), dp(4))
-            background = null
-            elevation = 0f
+            setPadding(dp(2), 0, dp(2), dp(4))
         }
+        fullscreenTitleView = text("Now playing", 11.5f, Color.rgb(230, 234, 242), true).apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        val exitFullscreenBtn = text("✕", 13f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            background = rounded(Color.argb(120, 42, 46, 56), 14)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Exit full screen"
+            setOnClickListener { if (isFullscreen) toggleFullscreen() }
+        }
+        dockTopRow.addView(fullscreenTitleView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            rightMargin = dp(8)
+        })
+        dockTopRow.addView(exitFullscreenBtn, LinearLayout.LayoutParams(dp(28), dp(26)))
+        fullscreenControls.addView(dockTopRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        // Middle row: Time — Custom CinemaSeekBar — Duration
+        overlaySeekBar = CinemaSeekBar(this).apply {
+            max = 1000
+            onStartScrub = {
+                isScrubbing = true
+            }
+            onProgressScrub = { value ->
+                val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+                val previewMs = (value.toLong() * d) / 1000L
+                fullscreenCurrentTime.text = formatTime(previewMs)
+                showCenterHud(formatTime(previewMs))
+            }
+            onStopScrub = { value ->
+                val d = player.duration
+                if (d != C.TIME_UNSET && d > 0L) {
+                    player.seekTo((value.toLong() * d) / 1000L)
+                }
+                isScrubbing = false
+                mainHandler.removeCallbacks(hideCenterHudRunnable)
+                mainHandler.postDelayed(hideCenterHudRunnable, 350L)
+            }
+        }
+
+        val fullscreenSeekRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        fullscreenCurrentTime = text("00:00", 10.5f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            includeFontPadding = false
+        }
+        fullscreenDuration = text("00:00", 10.5f, Color.rgb(168, 174, 186), true).apply {
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            includeFontPadding = false
+        }
+        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(dp(44), dp(34)))
+        fullscreenSeekRow.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(34), 1f))
+        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(dp(44), dp(34)))
+        fullscreenControls.addView(
+            fullscreenSeekRow,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
+        )
+
+        // Bottom row: Speed Pill | -10s | Play/Pause | +10s | Rotate
         val rewind = transportButton("↶ 10").apply {
             setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
         }
@@ -1248,71 +1442,46 @@ class MainActivity : Activity() {
         overlayRotateButton = transportButton("↻").apply {
             setOnClickListener { toggleFullscreenOrientation() }
         }
-        overlaySeekBar = SeekBar(this).apply {
-            max = 1000
-            progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(255, 79, 94))
-            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onStartTrackingTouch(bar: SeekBar?) { isScrubbing = true }
-                override fun onStopTrackingTouch(bar: SeekBar?) {
-                    val d = player.duration
-                    if (d != C.TIME_UNSET && d > 0L) player.seekTo(progress * d / 1000L)
-                    isScrubbing = false
-                }
-                override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {}
-            })
-        }
-        val fullscreenSeekRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        fullscreenCurrentTime = text("00:00", 10f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER_VERTICAL or Gravity.START
-            includeFontPadding = false
-        }
-        fullscreenDuration = text("00:00", 10f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            includeFontPadding = false
-        }
-        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(dp(42), dp(30)))
-        fullscreenSeekRow.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(30), 1f))
-        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(dp(42), dp(30)))
-        fullscreenControls.orientation = LinearLayout.VERTICAL
-        fullscreenControls.gravity = Gravity.CENTER_HORIZONTAL
-        fullscreenControls.addView(
-            fullscreenSeekRow,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32))
-        )
 
         val fullscreenTransport = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, 0)
         }
         listOf(overlaySpeedButton, rewind, overlayPlayButton, forward, overlayRotateButton).forEachIndexed { index, control ->
-            control.background = rounded(Color.argb(110, 12, 14, 18), 22)
-            control.textSize = if (index == 2) 17f else 11f
-            val btnWidth = when (index) {
-                2 -> 44
-                0 -> 44
-                4 -> 38
-                else -> 46
+            val isPlay = index == 2
+            control.background = rounded(
+                if (isPlay) Color.rgb(255, 79, 94) else Color.argb(170, 32, 36, 46),
+                if (isPlay) 22 else 14
+            )
+            control.textSize = when (index) {
+                2 -> 18f
+                4 -> 15f
+                else -> 11f
             }
+            val btnWidth = when (index) {
+                2 -> 54
+                0 -> 48
+                4 -> 42
+                else -> 52
+            }
+            val btnHeight = if (isPlay) 40 else 36
             fullscreenTransport.addView(
                 control,
-                LinearLayout.LayoutParams(dp(btnWidth), dp(34)).apply {
-                    if (index != 0) leftMargin = dp(7)
+                LinearLayout.LayoutParams(dp(btnWidth), dp(btnHeight)).apply {
+                    if (index != 0) leftMargin = dp(8)
                 }
             )
         }
         fullscreenControls.addView(
             fullscreenTransport,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(38))
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         )
         fullscreenControls.visibility = View.GONE
         videoFrame.addView(
             fullscreenControls,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
-                setMargins(dp(14), 0, dp(14), dp(12))
+                setMargins(dp(14), 0, dp(14), dp(14))
             }
         )
 
@@ -1606,6 +1775,7 @@ class MainActivity : Activity() {
         updateModeChips()
         setProjection(VrVideoSurfaceView.Projection.VR180)
         titleView.text = currentVideoName
+        if (::fullscreenTitleView.isInitialized) fullscreenTitleView.text = currentVideoName
         placeholder.visibility = View.VISIBLE
 
         val activeSurface = vrOutputSurface ?: vrSurfaceView.getVideoSurface()
