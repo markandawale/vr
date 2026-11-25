@@ -2,6 +2,7 @@ package com.example.panoplay
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -25,9 +26,13 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.GestureDetector
@@ -56,6 +61,9 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.BaseDataSource
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -66,10 +74,142 @@ import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import java.io.File
+import java.io.FileInputStream
+import java.io.IOException
 import java.util.ArrayList
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
+
+/**
+ * Resolves content:// URIs to direct local FileDataSource whenever accessible,
+ * and falls back to duplicated ParcelFileDescriptor streams so rapid seeks never hit EBADF.
+ */
+@OptIn(UnstableApi::class)
+private class ReliableVideoDataSource(private val context: Context) : BaseDataSource(/* isNetwork= */ false) {
+    private val defaultDelegate = DefaultDataSource.Factory(context).createDataSource()
+    private var usingDelegate = false
+    private var activeUri: Uri? = null
+    private var dupPfd: ParcelFileDescriptor? = null
+    private var inputStream: FileInputStream? = null
+    private var bytesRemaining: Long = C.LENGTH_UNSET.toLong()
+    private var opened = false
+
+    override fun open(dataSpec: DataSpec): Long {
+        activeUri = dataSpec.uri
+        val scheme = dataSpec.uri.scheme
+
+        // Direct file:// URIs use Media3's native RandomAccessFile FileDataSource directly
+        if (scheme == "file" || scheme.isNullOrEmpty()) {
+            usingDelegate = true
+            return defaultDelegate.open(dataSpec)
+        }
+
+        // For content:// URIs, open a fresh duplicated ParcelFileDescriptor to prevent EBADF on concurrent seek
+        if (scheme == "content") {
+            usingDelegate = false
+            transferInitializing(dataSpec)
+            try {
+                val rawPfd = context.contentResolver.openFileDescriptor(dataSpec.uri, "r")
+                    ?: throw IOException("Cannot open descriptor for ${dataSpec.uri}")
+                val duplicated = rawPfd.dup()
+                try {
+                    rawPfd.close()
+                } catch (_: IOException) {
+                }
+                dupPfd = duplicated
+                val fis = FileInputStream(duplicated.fileDescriptor)
+                inputStream = fis
+
+                if (dataSpec.position > 0L) {
+                    var skippedTotal = 0L
+                    while (skippedTotal < dataSpec.position) {
+                        val step = fis.skip(dataSpec.position - skippedTotal)
+                        if (step <= 0L) {
+                            // Fallback to FileChannel position if skip returns 0
+                            fis.channel.position(dataSpec.position)
+                            break
+                        }
+                        skippedTotal += step
+                    }
+                }
+
+                val statSize = duplicated.statSize
+                bytesRemaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
+                    dataSpec.length
+                } else if (statSize >= 0L) {
+                    (statSize - dataSpec.position).coerceAtLeast(0L)
+                } else {
+                    C.LENGTH_UNSET.toLong()
+                }
+                opened = true
+                transferStarted(dataSpec)
+                return bytesRemaining
+            } catch (e: Exception) {
+                close()
+                usingDelegate = true
+                return defaultDelegate.open(dataSpec)
+            }
+        }
+
+        usingDelegate = true
+        return defaultDelegate.open(dataSpec)
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (usingDelegate) return defaultDelegate.read(buffer, offset, length)
+        if (length == 0) return 0
+        if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
+
+        val toRead = if (bytesRemaining == C.LENGTH_UNSET.toLong()) {
+            length
+        } else {
+            min(bytesRemaining, length.toLong()).toInt()
+        }
+        val stream = inputStream ?: return C.RESULT_END_OF_INPUT
+        val readBytes = stream.read(buffer, offset, toRead)
+        if (readBytes == -1) {
+            return C.RESULT_END_OF_INPUT
+        }
+        if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
+            bytesRemaining -= readBytes.toLong()
+        }
+        bytesTransferred(readBytes)
+        return readBytes
+    }
+
+    override fun getUri(): Uri? = if (usingDelegate) defaultDelegate.uri else activeUri
+
+    override fun close() {
+        activeUri = null
+        if (usingDelegate) {
+            usingDelegate = false
+            defaultDelegate.close()
+            return
+        }
+        try {
+            inputStream?.close()
+        } catch (_: IOException) {
+        } finally {
+            inputStream = null
+        }
+        try {
+            dupPfd?.close()
+        } catch (_: IOException) {
+        } finally {
+            dupPfd = null
+        }
+        if (opened) {
+            opened = false
+            transferEnded()
+        }
+    }
+
+    class Factory(private val context: Context) : DataSource.Factory {
+        override fun createDataSource(): DataSource = ReliableVideoDataSource(context)
+    }
+}
 
 /**
  * Exact Material vector icons matching reference screenshot (1000063554.jpg)
@@ -681,7 +821,7 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var vrSurfaceView: VrVideoSurfaceView
     private var vrOutputSurface: Surface? = null
     private var pendingMediaUri: Uri? = null
-    private var activeMediaUri: Uri? = null
+    private var activePlaybackUri: Uri? = null
     private var lastRequestedSeekMs: Long = -1L
     private var ioRetryCount = 0
 
@@ -887,8 +1027,9 @@ class MainActivity : Activity(), SensorEventListener {
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        // Use stock DefaultDataSource + DefaultMediaSourceFactory so MP4 keyframe index seeking works reliably
-        val dataSourceFactory = DefaultDataSource.Factory(this)
+        // ReliableVideoDataSource resolves real local file:// paths (bypassing FUSE MediaProvider EBADF)
+        // and uses duplicated ParcelFileDescriptors for content:// URIs
+        val dataSourceFactory = ReliableVideoDataSource.Factory(this)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
         player = ExoPlayer.Builder(this, renderersFactory)
@@ -939,7 +1080,7 @@ class MainActivity : Activity(), SensorEventListener {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                val uri = activeMediaUri
+                val uri = activePlaybackUri
                 if (uri != null && ioRetryCount < 3) {
                     ioRetryCount++
                     val targetPosition = if (lastRequestedSeekMs >= 0L) {
@@ -948,7 +1089,7 @@ class MainActivity : Activity(), SensorEventListener {
                         player.currentPosition.coerceAtLeast(0L)
                     }
                     mainHandler.postDelayed({
-                        if (::player.isInitialized && activeMediaUri == uri) {
+                        if (::player.isInitialized && activePlaybackUri == uri) {
                             rebindActiveSurface()
                             player.stop()
                             player.clearMediaItems()
@@ -968,12 +1109,98 @@ class MainActivity : Activity(), SensorEventListener {
                     "Can't play this video: ${error.errorCodeName}",
                     Toast.LENGTH_LONG
                 ).show()
-                if (activeMediaUri == null) {
+                if (activePlaybackUri == null) {
                     placeholder.visibility = View.VISIBLE
                 }
             }
         })
         mainHandler.post(progressUpdater)
+    }
+
+    /**
+     * Resolves a SAF document URI to a direct readable File URI (/storage/emulated/0/...)
+     * whenever possible so ExoPlayer uses RandomAccessFile instead of MediaProvider FUSE streams.
+     */
+    private fun resolveBestPlaybackUri(documentUri: Uri): Uri {
+        try {
+            val filePath = resolveLocalFilePath(documentUri)
+            if (!filePath.isNullOrBlank()) {
+                val file = File(filePath)
+                if (file.exists() && file.canRead() && file.length() > 0L) {
+                    return Uri.fromFile(file)
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return documentUri
+    }
+
+    private fun resolveLocalFilePath(uri: Uri): String? {
+        if ("file".equals(uri.scheme, ignoreCase = true)) {
+            return uri.path
+        }
+        if (DocumentsContract.isDocumentUri(this, uri)) {
+            val docId = DocumentsContract.getDocumentId(uri)
+            val authority = uri.authority.orEmpty()
+            if (authority == "com.android.externalstorage.documents") {
+                val parts = docId.split(":")
+                if (parts.size >= 2) {
+                    val type = parts[0]
+                    val relPath = parts[1]
+                    if ("primary".equals(type, ignoreCase = true)) {
+                        @Suppress("DEPRECATION")
+                        return "${Environment.getExternalStorageDirectory()}/$relPath"
+                    } else {
+                        val storageFile = File("/storage/$type/$relPath")
+                        if (storageFile.exists()) return storageFile.absolutePath
+                    }
+                }
+            } else if (authority == "com.android.providers.downloads.documents") {
+                if (docId.startsWith("raw:")) {
+                    return docId.removePrefix("raw:")
+                }
+                val idLong = docId.toLongOrNull()
+                if (idLong != null) {
+                    val contentUri = ContentUris.withAppendedId(
+                        Uri.parse("content://downloads/public_downloads"),
+                        idLong
+                    )
+                    queryDataColumn(contentUri, null, null)?.let { return it }
+                }
+            } else if (authority == "com.android.providers.media.documents") {
+                val parts = docId.split(":")
+                if (parts.size >= 2 && parts[0] == "video") {
+                    val contentUri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                    queryDataColumn(contentUri, "_id=?", arrayOf(parts[1]))?.let { return it }
+                }
+            }
+        }
+        if ("content".equals(uri.scheme, ignoreCase = true)) {
+            queryDataColumn(uri, null, null)?.let { return it }
+        }
+        return null
+    }
+
+    @Suppress("DEPRECATION")
+    private fun queryDataColumn(uri: Uri, selection: String?, selectionArgs: Array<String>?): String? {
+        var cursor: Cursor? = null
+        return try {
+            cursor = contentResolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns.DATA),
+                selection,
+                selectionArgs,
+                null
+            )
+            if (cursor != null && cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                if (idx >= 0) cursor.getString(idx) else null
+            } else null
+        } catch (_: Exception) {
+            null
+        } finally {
+            cursor?.close()
+        }
     }
 
     private fun performSafeSeek(targetMs: Long) {
@@ -2374,17 +2601,18 @@ class MainActivity : Activity(), SensorEventListener {
         if (::fullscreenTitleView.isInitialized) fullscreenTitleView.text = currentVideoName
         placeholder.visibility = View.VISIBLE
 
+        val playbackUri = resolveBestPlaybackUri(uri)
         val activeSurface = vrOutputSurface ?: vrSurfaceView.getVideoSurface()
         if (activeSurface != null && activeSurface.isValid) {
             player.setVideoSurface(activeSurface)
-            startPlayback(uri)
+            startPlayback(playbackUri)
         } else {
-            pendingMediaUri = uri
+            pendingMediaUri = playbackUri
         }
     }
 
     private fun startPlayback(uri: Uri) {
-        activeMediaUri = uri
+        activePlaybackUri = uri
         lastRequestedSeekMs = -1L
         ioRetryCount = 0
         lastRenderedFrames = 0
