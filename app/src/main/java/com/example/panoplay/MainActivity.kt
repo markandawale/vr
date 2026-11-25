@@ -59,7 +59,10 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -74,6 +77,44 @@ import java.util.ArrayList
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
+
+/**
+ * Guards DefaultDataSource against negative/invalid read lengths (e.g. regionLength=-1 from
+ * corrupted MP4 sample tables) before they hit FileInputStream / IoBridge.read().
+ */
+@OptIn(UnstableApi::class)
+private class SafeGuardDataSource(private val upstream: DataSource) : DataSource {
+    override fun addTransferListener(transferListener: TransferListener) {
+        upstream.addTransferListener(transferListener)
+    }
+
+    override fun open(dataSpec: DataSpec): Long {
+        return upstream.open(dataSpec)
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (length == 0) return 0
+        if (length < 0 || offset < 0 || offset > buffer.size) {
+            return C.RESULT_END_OF_INPUT
+        }
+        val safeLength = min(length, buffer.size - offset)
+        if (safeLength <= 0) {
+            return C.RESULT_END_OF_INPUT
+        }
+        return upstream.read(buffer, offset, safeLength)
+    }
+
+    override fun getUri(): Uri? = upstream.uri
+
+    override fun close() {
+        upstream.close()
+    }
+
+    class Factory(context: Context) : DataSource.Factory {
+        private val baseFactory = DefaultDataSource.Factory(context)
+        override fun createDataSource(): DataSource = SafeGuardDataSource(baseFactory.createDataSource())
+    }
+}
 
 /**
  * Exact Material vector icons matching reference screenshot
@@ -892,7 +933,8 @@ class MainActivity : Activity(), SensorEventListener {
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        val dataSourceFactory = DefaultDataSource.Factory(this)
+        // SafeGuardDataSource prevents regionLength=-1 ArrayIndexOutOfBoundsException in IoBridge.read()
+        val dataSourceFactory = SafeGuardDataSource.Factory(this)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
@@ -962,11 +1004,13 @@ class MainActivity : Activity(), SensorEventListener {
 
                 if (uri != null && consecutiveErrorCount < 4) {
                     consecutiveErrorCount++
-                    val targetPosition = if (lastRequestedSeekMs >= 0L) {
+                    val basePos = if (lastRequestedSeekMs >= 0L) {
                         lastRequestedSeekMs
                     } else {
                         player.currentPosition.coerceAtLeast(0L)
                     }
+                    // Step forward slightly (+350ms) on retry to skip past any corrupted MP4 sample frame
+                    val targetPosition = basePos + (consecutiveErrorCount * 350L)
                     mainHandler.postDelayed({
                         if (::player.isInitialized && activePlaybackUri == uri) {
                             rebindActiveSurface()
@@ -979,7 +1023,7 @@ class MainActivity : Activity(), SensorEventListener {
                             }
                             player.playWhenReady = true
                         }
-                    }, 120L)
+                    }, 100L)
                     return
                 }
 
