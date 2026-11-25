@@ -9,9 +9,12 @@ import android.database.Cursor
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioManager
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
@@ -64,8 +67,82 @@ import kotlin.math.abs
 import kotlin.math.min
 
 /**
+ * Clean Material / Google Files style speaker vector drawable for the translucent Volume HUD.
+ */
+private class VolumeVectorDrawable(
+    private val levelPercent: Int,
+    private val density: Float
+) : Drawable() {
+
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+    }
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 1.9f * density
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val speakerPath = Path()
+    private val waveRect = RectF()
+
+    override fun draw(canvas: Canvas) {
+        val w = bounds.width().toFloat()
+        val h = bounds.height().toFloat()
+        if (w <= 0f || h <= 0f) return
+
+        val cy = h * 0.5f
+        // Speaker cone body (Google Files style minimal rounded silhouette)
+        speakerPath.reset()
+        speakerPath.moveTo(w * 0.14f, cy - h * 0.15f)
+        speakerPath.lineTo(w * 0.30f, cy - h * 0.15f)
+        speakerPath.lineTo(w * 0.48f, cy - h * 0.31f)
+        speakerPath.lineTo(w * 0.48f, cy + h * 0.31f)
+        speakerPath.lineTo(w * 0.30f, cy + h * 0.15f)
+        speakerPath.lineTo(w * 0.14f, cy + h * 0.15f)
+        speakerPath.close()
+        canvas.drawPath(speakerPath, fillPaint)
+
+        if (levelPercent <= 0) {
+            // Clean diagonal mute cross on right side
+            val x1 = w * 0.60f
+            val x2 = w * 0.84f
+            val y1 = cy - h * 0.14f
+            val y2 = cy + h * 0.14f
+            canvas.drawLine(x1, y1, x2, y2, strokePaint)
+            canvas.drawLine(x2, y1, x1, y2, strokePaint)
+        } else {
+            // Inner sound wave arc
+            val r1 = w * 0.16f
+            waveRect.set(w * 0.46f - r1, cy - r1, w * 0.46f + r1, cy + r1)
+            canvas.drawArc(waveRect, -42f, 84f, false, strokePaint)
+
+            // Outer sound wave arc for > 45% volume
+            if (levelPercent > 45) {
+                val r2 = w * 0.31f
+                waveRect.set(w * 0.46f - r2, cy - r2, w * 0.46f + r2, cy + r2)
+                canvas.drawArc(waveRect, -45f, 90f, false, strokePaint)
+            }
+        }
+    }
+
+    override fun setAlpha(alpha: Int) {
+        fillPaint.alpha = alpha
+        strokePaint.alpha = alpha
+    }
+
+    override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {
+        fillPaint.colorFilter = colorFilter
+        strokePaint.colorFilter = colorFilter
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
+}
+
+/**
  * Custom sleek cinema-style seek slider for fullscreen mode.
- * Expands track height and thumb glow when touched for effortless precision scrubbing.
  */
 private class CinemaSeekBar(context: Context) : View(context) {
     var max: Int = 1000
@@ -185,13 +262,19 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
     var onBrightnessSwipe: ((Float) -> Unit)? = null
     var onBrightnessSwipeEnd: (() -> Unit)? = null
 
+    var onVolumeSwipeStart: (() -> Float)? = null
+    var onVolumeSwipe: ((Float) -> Unit)? = null
+    var onVolumeSwipeEnd: (() -> Unit)? = null
+
     private var startX = 0f
     private var startY = 0f
     private var downTimeMs = 0L
     private var movedBeyondSlop = false
     private var multiTouchOccurred = false
-    private var isBrightnessGesture = false
-    private var startBrightness = 0.5f
+    private var activeGesture = GestureMode.NONE
+    private var startLevel = 0.5f
+
+    private enum class GestureMode { NONE, BRIGHTNESS, VOLUME }
 
     private val gestureDetector = GestureDetector(
         context,
@@ -219,23 +302,17 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
                 downTimeMs = SystemClock.uptimeMillis()
                 movedBeyondSlop = false
                 multiTouchOccurred = false
-                isBrightnessGesture = false
+                activeGesture = GestureMode.NONE
                 return super.dispatchTouchEvent(event)
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 multiTouchOccurred = true
-                if (isBrightnessGesture) {
-                    isBrightnessGesture = false
-                    onBrightnessSwipeEnd?.invoke()
-                }
+                finishVerticalGesture()
                 return super.dispatchTouchEvent(event)
             }
             MotionEvent.ACTION_MOVE -> {
                 if (event.pointerCount > 1 || multiTouchOccurred) {
-                    if (isBrightnessGesture) {
-                        isBrightnessGesture = false
-                        onBrightnessSwipeEnd?.invoke()
-                    }
+                    finishVerticalGesture()
                     return super.dispatchTouchEvent(event)
                 }
                 val dx = event.x - startX
@@ -244,33 +321,38 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
                     movedBeyondSlop = true
                 }
 
-                if (!isBrightnessGesture &&
-                    startX < width * 0.28f &&
+                if (activeGesture == GestureMode.NONE &&
                     abs(dy) > slop &&
                     abs(dy) > abs(dx) * 1.35f &&
                     shouldIgnoreTap?.invoke(startX, startY) != true
                 ) {
-                    isBrightnessGesture = true
-                    startBrightness = onBrightnessSwipeStart?.invoke() ?: 0.5f
-                    val cancelEvent = MotionEvent.obtain(event).apply {
-                        action = MotionEvent.ACTION_CANCEL
+                    if (startX < width * 0.28f) {
+                        activeGesture = GestureMode.BRIGHTNESS
+                        startLevel = onBrightnessSwipeStart?.invoke() ?: 0.5f
+                        cancelChildTouch(event)
+                    } else if (startX > width * 0.90f) {
+                        // Right 10% edge vertical swipe controls volume without interfering with VR drag
+                        activeGesture = GestureMode.VOLUME
+                        startLevel = onVolumeSwipeStart?.invoke() ?: 0.5f
+                        cancelChildTouch(event)
                     }
-                    super.dispatchTouchEvent(cancelEvent)
-                    cancelEvent.recycle()
                 }
 
-                if (isBrightnessGesture) {
+                if (activeGesture != GestureMode.NONE) {
                     val travelHeight = (height * 0.72f).coerceAtLeast(120f)
                     val delta = -dy / travelHeight
-                    onBrightnessSwipe?.invoke((startBrightness + delta).coerceIn(0.01f, 1.0f))
+                    if (activeGesture == GestureMode.BRIGHTNESS) {
+                        onBrightnessSwipe?.invoke((startLevel + delta).coerceIn(0.01f, 1.0f))
+                    } else if (activeGesture == GestureMode.VOLUME) {
+                        onVolumeSwipe?.invoke((startLevel + delta).coerceIn(0.0f, 1.0f))
+                    }
                     return true
                 }
                 return super.dispatchTouchEvent(event)
             }
             MotionEvent.ACTION_UP -> {
-                if (isBrightnessGesture) {
-                    isBrightnessGesture = false
-                    onBrightnessSwipeEnd?.invoke()
+                if (activeGesture != GestureMode.NONE) {
+                    finishVerticalGesture()
                     return true
                 }
                 val handled = super.dispatchTouchEvent(event)
@@ -287,15 +369,31 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
             }
             MotionEvent.ACTION_CANCEL -> {
                 downTimeMs = 0L
-                if (isBrightnessGesture) {
-                    isBrightnessGesture = false
-                    onBrightnessSwipeEnd?.invoke()
+                if (activeGesture != GestureMode.NONE) {
+                    finishVerticalGesture()
                     return true
                 }
                 return super.dispatchTouchEvent(event)
             }
         }
         return super.dispatchTouchEvent(event)
+    }
+
+    private fun cancelChildTouch(event: MotionEvent) {
+        val cancelEvent = MotionEvent.obtain(event).apply {
+            action = MotionEvent.ACTION_CANCEL
+        }
+        super.dispatchTouchEvent(cancelEvent)
+        cancelEvent.recycle()
+    }
+
+    private fun finishVerticalGesture() {
+        when (activeGesture) {
+            GestureMode.BRIGHTNESS -> onBrightnessSwipeEnd?.invoke()
+            GestureMode.VOLUME -> onVolumeSwipeEnd?.invoke()
+            GestureMode.NONE -> {}
+        }
+        activeGesture = GestureMode.NONE
     }
 }
 
@@ -403,6 +501,10 @@ class MainActivity : Activity() {
         if (::centerHud.isInitialized) {
             centerHud.visibility = View.GONE
         }
+    }
+
+    private val audioManager by lazy {
+        getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
 
     private val progressUpdater = object : Runnable {
@@ -535,7 +637,6 @@ class MainActivity : Activity() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        // Fresh DefaultDataSourceFactory ensures clean ContentResolver descriptor allocation per playback
         val dataSourceFactory = DefaultDataSource.Factory(this)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
@@ -583,7 +684,6 @@ class MainActivity : Activity() {
 
             override fun onPlayerError(error: PlaybackException) {
                 val uri = activeMediaUri
-                // Automatically recover from transient SAF/ContentResolver IO errors without restarting the app
                 if (uri != null &&
                     ioRetryCount < 2 &&
                     (error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
@@ -632,8 +732,16 @@ class MainActivity : Activity() {
 
     private var currentVideoName: String = ""
 
-    private fun showCenterHud(message: String, autoHideMs: Long = 0L) {
+    private fun showCenterHud(message: String, autoHideMs: Long = 0L, leftDrawable: Drawable? = null) {
         mainHandler.removeCallbacks(hideCenterHudRunnable)
+        if (leftDrawable != null) {
+            val iconSize = dp(18)
+            leftDrawable.setBounds(0, 0, iconSize, iconSize)
+            centerHud.compoundDrawablePadding = dp(7)
+            centerHud.setCompoundDrawables(leftDrawable, null, null, null)
+        } else {
+            centerHud.setCompoundDrawables(null, null, null, null)
+        }
         centerHud.text = message
         centerHud.visibility = View.VISIBLE
         if (autoHideMs > 0L) {
@@ -666,6 +774,22 @@ class MainActivity : Activity() {
 
         val percent = (clamped * 100f).toInt().coerceIn(1, 100)
         showCenterHud("☀  $percent%")
+    }
+
+    private fun readCurrentVolumeNormalized(): Float {
+        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        val cur = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        return (cur.toFloat() / max.toFloat()).coerceIn(0f, 1f)
+    }
+
+    private fun applyVolumeNormalized(value: Float) {
+        val clamped = value.coerceIn(0f, 1f)
+        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        val targetIndex = (clamped * max + 0.5f).toInt().coerceIn(0, max)
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetIndex, 0)
+        val percent = ((targetIndex.toFloat() / max.toFloat()) * 100f).toInt().coerceIn(0, 100)
+        val speakerDrawable = VolumeVectorDrawable(percent, resources.displayMetrics.density)
+        showCenterHud("$percent%", leftDrawable = speakerDrawable)
     }
 
     private fun formatSpeedLabel(speed: Float): String =
@@ -1285,6 +1409,12 @@ class MainActivity : Activity() {
                 mainHandler.removeCallbacks(hideCenterHudRunnable)
                 mainHandler.postDelayed(hideCenterHudRunnable, 800L)
             }
+            onVolumeSwipeStart = { readCurrentVolumeNormalized() }
+            onVolumeSwipe = { level -> applyVolumeNormalized(level) }
+            onVolumeSwipeEnd = {
+                mainHandler.removeCallbacks(hideCenterHudRunnable)
+                mainHandler.postDelayed(hideCenterHudRunnable, 800L)
+            }
         }
 
         playerView = LayoutInflater.from(this).inflate(R.layout.video_player, videoFrame, false) as PlayerView
@@ -1325,11 +1455,12 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
 
+        // Translucent HUD for Brightness, Volume, Speed, Rotation & Seek feedback
         centerHud = text("☀  50%", 14f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(18), dp(10), dp(18), dp(10))
             background = rounded(Color.argb(115, 15, 17, 22), 24)
-            alpha = 0.85f
+            alpha = 0.88f
             elevation = dp(4).toFloat()
             visibility = View.GONE
         }
@@ -1676,9 +1807,9 @@ class MainActivity : Activity() {
         root.addView(transport)
         fullscreenChrome.add(transport)
 
-        val hint = text("DRAG TO LOOK AROUND  •  PINCH TO ZOOM  •  LEFT SWIPE BRIGHTNESS", 9f, Color.rgb(119, 125, 136), true).apply {
+        val hint = text("DRAG TO LOOK AROUND  •  PINCH TO ZOOM  •  L BRIGHTNESS  •  R VOLUME", 9f, Color.rgb(119, 125, 136), true).apply {
             gravity = Gravity.CENTER
-            letterSpacing = 0.04f
+            letterSpacing = 0.035f
             setPadding(0, dp(6), 0, dp(2))
         }
         root.addView(hint, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(22)))
