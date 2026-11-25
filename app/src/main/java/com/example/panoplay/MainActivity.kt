@@ -36,6 +36,7 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.ScrollView
@@ -65,6 +66,107 @@ import java.util.ArrayList
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
+
+/**
+ * Pixel-accurate vector icons for fullscreen Play, Pause, Rewind, and Forward controls.
+ */
+private class TransportIconDrawable(
+    private val iconType: Type,
+    private val tintColor: Int
+) : Drawable() {
+
+    enum class Type { PLAY, PAUSE, REWIND, FORWARD }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = tintColor
+        style = Paint.Style.FILL
+    }
+    private val path = Path()
+    private val rect = RectF()
+
+    override fun draw(canvas: Canvas) {
+        val w = bounds.width().toFloat()
+        val h = bounds.height().toFloat()
+        if (w <= 0f || h <= 0f) return
+        val cx = w * 0.5f
+        val cy = h * 0.5f
+
+        when (iconType) {
+            Type.PLAY -> {
+                // Optically centered Play triangle inside circle
+                val halfH = h * 0.21f
+                val leftX = cx - w * 0.13f
+                val rightX = cx + w * 0.19f
+                path.reset()
+                path.moveTo(leftX, cy - halfH)
+                path.lineTo(rightX, cy)
+                path.lineTo(leftX, cy + halfH)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            Type.PAUSE -> {
+                // Exact symmetric dual vertical bars centered in circle
+                val barW = w * 0.085f
+                val halfH = h * 0.20f
+                val gap = w * 0.075f
+                val r = barW * 0.25f
+
+                rect.set(cx - gap - barW, cy - halfH, cx - gap, cy + halfH)
+                canvas.drawRoundRect(rect, r, r, paint)
+
+                rect.set(cx + gap, cy - halfH, cx + gap + barW, cy + halfH)
+                canvas.drawRoundRect(rect, r, r, paint)
+            }
+            Type.REWIND -> {
+                val triW = w * 0.23f
+                val halfH = h * 0.21f
+                // Left triangle
+                path.reset()
+                path.moveTo(cx - triW, cy)
+                path.lineTo(cx, cy - halfH)
+                path.lineTo(cx, cy + halfH)
+                path.close()
+                canvas.drawPath(path, paint)
+                // Right triangle
+                path.reset()
+                path.moveTo(cx, cy)
+                path.lineTo(cx + triW, cy - halfH)
+                path.lineTo(cx + triW, cy + halfH)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            Type.FORWARD -> {
+                val triW = w * 0.23f
+                val halfH = h * 0.21f
+                // Left triangle
+                path.reset()
+                path.moveTo(cx - triW, cy - halfH)
+                path.lineTo(cx, cy)
+                path.lineTo(cx - triW, cy + halfH)
+                path.close()
+                canvas.drawPath(path, paint)
+                // Right triangle
+                path.reset()
+                path.moveTo(cx, cy - halfH)
+                path.lineTo(cx + triW, cy)
+                path.lineTo(cx, cy + halfH)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+        }
+    }
+
+    override fun setAlpha(alpha: Int) {
+        paint.alpha = alpha
+    }
+
+    override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {
+        paint.colorFilter = colorFilter
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
+}
 
 /**
  * Clean Material / Google Files style speaker vector drawable for the translucent Volume HUD.
@@ -163,15 +265,15 @@ private class CinemaSeekBar(context: Context) : View(context) {
         style = Paint.Style.FILL
     }
     private val trackFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(255, 79, 94)
+        color = Color.rgb(122, 146, 255)
         style = Paint.Style.FILL
     }
     private val thumbGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(80, 255, 79, 94)
+        color = Color.argb(80, 122, 146, 255)
         style = Paint.Style.FILL
     }
     private val thumbCorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
+        color = Color.rgb(122, 146, 255)
         style = Paint.Style.FILL
     }
     private val trackRect = RectF()
@@ -460,11 +562,11 @@ class MainActivity : Activity() {
     private lateinit var durationView: TextView
     private lateinit var fullscreenButton: TextView
 
-    // Redesigned Fullscreen Controls (Top bar + Center transport + Bottom slider & pills)
+    // Fullscreen Controls
     private lateinit var fullscreenTopBar: LinearLayout
     private lateinit var fullscreenCenterControls: LinearLayout
     private lateinit var fullscreenBottomControls: LinearLayout
-    private lateinit var overlayPlayButton: TextView
+    private lateinit var overlayPlayButton: ImageView
     private lateinit var overlaySeekBar: CinemaSeekBar
     private lateinit var fullscreenTitleView: TextView
     private lateinit var fullscreenCurrentTime: TextView
@@ -473,6 +575,9 @@ class MainActivity : Activity() {
     private lateinit var speedButton: TextView
     private lateinit var overlaySpeedButton: TextView
     private lateinit var overlayRotateButton: TextView
+
+    private val playVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PLAY, Color.rgb(14, 16, 22)) }
+    private val pauseVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PAUSE, Color.rgb(14, 16, 22)) }
 
     private val fullscreenChrome = mutableListOf<View>()
     private var isFullscreen = false
@@ -649,7 +754,9 @@ class MainActivity : Activity() {
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 playButton.text = if (isPlaying) "Ⅱ" else "▶"
-                if (::overlayPlayButton.isInitialized) overlayPlayButton.text = if (isPlaying) "Ⅱ" else "▶"
+                if (::overlayPlayButton.isInitialized) {
+                    overlayPlayButton.setImageDrawable(if (isPlaying) pauseVector else playVector)
+                }
                 if (!isPlaying && ::fpsBadge.isInitialized) {
                     fpsBadge.text = "-- FPS"
                 }
@@ -665,7 +772,9 @@ class MainActivity : Activity() {
                 }
                 if (playbackState == Player.STATE_ENDED) {
                     playButton.text = "▶"
-                    if (::overlayPlayButton.isInitialized) overlayPlayButton.text = "▶"
+                    if (::overlayPlayButton.isInitialized) {
+                        overlayPlayButton.setImageDrawable(playVector)
+                    }
                     if (::fpsBadge.isInitialized) fpsBadge.text = "-- FPS"
                 }
             }
@@ -808,7 +917,7 @@ class MainActivity : Activity() {
             val label = formatSpeedLabel(selected)
             speedButton.text = label
             if (::overlaySpeedButton.isInitialized) overlaySpeedButton.text = label
-            showCenterHud("⚡  $label", 800L)
+            showCenterHud(label, 800L)
             true
         }
         popup.show()
@@ -1551,23 +1660,24 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP)
         )
 
-        // 2. Fullscreen Center Transport Row (Rewind ◀◀  |  Large Circular Play/Pause  |  Forward ▶▶)
+        // 2. Fullscreen Center Transport Row (Clean white vector Rewind  |  Centered Blue Circle Play/Pause  |  Clean white vector Forward)
         fullscreenCenterControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             elevation = dp(6).toFloat()
             visibility = View.GONE
         }
-        val centerRewind = text("◀◀", 18f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            background = rounded(Color.argb(105, 15, 17, 22), 26)
+        val centerRewind = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_XY
+            setImageDrawable(TransportIconDrawable(TransportIconDrawable.Type.REWIND, Color.WHITE))
             isClickable = true
             isFocusable = true
             contentDescription = "Rewind 10 seconds"
             setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
         }
-        overlayPlayButton = text("▶", 24f, Color.rgb(14, 16, 22), true).apply {
-            gravity = Gravity.CENTER
+        overlayPlayButton = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_XY
+            setImageDrawable(playVector)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(Color.rgb(122, 146, 255))
@@ -1582,9 +1692,9 @@ class MainActivity : Activity() {
                 }
             }
         }
-        val centerForward = text("▶▶", 18f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            background = rounded(Color.argb(105, 15, 17, 22), 26)
+        val centerForward = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_XY
+            setImageDrawable(TransportIconDrawable(TransportIconDrawable.Type.FORWARD, Color.WHITE))
             isClickable = true
             isFocusable = true
             contentDescription = "Forward 10 seconds"
@@ -1593,12 +1703,12 @@ class MainActivity : Activity() {
                 player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(52), dp(52)).apply {
-            rightMargin = dp(26)
+        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+            rightMargin = dp(34)
         })
         fullscreenCenterControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(68), dp(68)))
-        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(52), dp(52)).apply {
-            leftMargin = dp(26)
+        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+            leftMargin = dp(34)
         })
         videoFrame.addView(
             fullscreenCenterControls,
@@ -1660,15 +1770,15 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
-        // Bottom pills row below slider: Speed & Landscape
+        // Bottom pills row below slider: Clean Speed (no lightning icon) & Landscape
         val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding(0, dp(10), 0, 0)
         }
-        overlaySpeedButton = text("⚡  1.0x", 12f, Color.WHITE, true).apply {
+        overlaySpeedButton = text("1.0x", 12f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(18), dp(9), dp(18), dp(9))
+            setPadding(dp(20), dp(9), dp(20), dp(9))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
@@ -2061,7 +2171,7 @@ class MainActivity : Activity() {
             rootLayout.clipChildren = false
             window.setBackgroundDrawableResource(android.R.color.black)
             overlayRotateButton.text = "↻  Landscape"
-            // Shift top badges slightly below fullscreenTopBar
+            overlayPlayButton.setImageDrawable(if (player.isPlaying) pauseVector else playVector)
             (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
             (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
             enterImmersiveMode()
