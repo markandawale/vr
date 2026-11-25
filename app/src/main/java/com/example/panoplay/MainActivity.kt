@@ -100,13 +100,11 @@ private class ReliableVideoDataSource(private val context: Context) : BaseDataSo
         activeUri = dataSpec.uri
         val scheme = dataSpec.uri.scheme
 
-        // Direct file:// URIs use Media3's native RandomAccessFile FileDataSource directly
         if (scheme == "file" || scheme.isNullOrEmpty()) {
             usingDelegate = true
             return defaultDelegate.open(dataSpec)
         }
 
-        // For content:// URIs, open a fresh duplicated ParcelFileDescriptor to prevent EBADF on concurrent seek
         if (scheme == "content") {
             usingDelegate = false
             transferInitializing(dataSpec)
@@ -127,7 +125,6 @@ private class ReliableVideoDataSource(private val context: Context) : BaseDataSo
                     while (skippedTotal < dataSpec.position) {
                         val step = fis.skip(dataSpec.position - skippedTotal)
                         if (step <= 0L) {
-                            // Fallback to FileChannel position if skip returns 0
                             fis.channel.position(dataSpec.position)
                             break
                         }
@@ -1027,8 +1024,6 @@ class MainActivity : Activity(), SensorEventListener {
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        // ReliableVideoDataSource resolves real local file:// paths (bypassing FUSE MediaProvider EBADF)
-        // and uses duplicated ParcelFileDescriptors for content:// URIs
         val dataSourceFactory = ReliableVideoDataSource.Factory(this)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
@@ -1117,10 +1112,6 @@ class MainActivity : Activity(), SensorEventListener {
         mainHandler.post(progressUpdater)
     }
 
-    /**
-     * Resolves a SAF document URI to a direct readable File URI (/storage/emulated/0/...)
-     * whenever possible so ExoPlayer uses RandomAccessFile instead of MediaProvider FUSE streams.
-     */
     private fun resolveBestPlaybackUri(documentUri: Uri): Uri {
         try {
             val filePath = resolveLocalFilePath(documentUri)
@@ -1218,7 +1209,7 @@ class MainActivity : Activity(), SensorEventListener {
         view.setCompoundDrawables(icon, null, null, null)
     }
 
-    private fun setMotionTrackingEnabled(enabled: Boolean, showFeedback: Boolean = true) {
+    private fun setMotionTrackingEnabled(enabled: Boolean) {
         if (enabled && gyroSensor == null) {
             Toast.makeText(this, "Gyroscope sensor not available on this device", Toast.LENGTH_SHORT).show()
             return
@@ -1242,9 +1233,6 @@ class MainActivity : Activity(), SensorEventListener {
                 PillIconDrawable(PillIconDrawable.Type.MOTION, textColor),
                 textColor
             )
-        }
-        if (showFeedback) {
-            showCenterHud(if (enabled) "MOTION ON" else "MOTION OFF", 750L)
         }
     }
 
@@ -1404,8 +1392,6 @@ class MainActivity : Activity(), SensorEventListener {
         if (::overlayRotateButton.isInitialized) {
             overlayRotateButton.text = if (isFullscreenLandscape) "Portrait" else "Landscape"
         }
-        val modeText = if (isFullscreenLandscape) "LANDSCAPE" else "PORTRAIT"
-        showCenterHud(modeText, 850L)
     }
 
     private fun handleDoubleTap(x: Float) {
@@ -1413,11 +1399,11 @@ class MainActivity : Activity(), SensorEventListener {
         val w = videoFrame.width.coerceAtLeast(1)
         if (x < w * 0.28f) {
             performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L))
-            showCenterHud("↶  10s", 750L)
+            showCenterHud("-10s", 750L)
         } else if (x > w * 0.72f) {
             val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
             performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
-            showCenterHud("10s  ↷", 750L)
+            showCenterHud("+10s", 750L)
         }
     }
 
@@ -2243,7 +2229,6 @@ class MainActivity : Activity(), SensorEventListener {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
-        // Bottom pills row below slider (Silent Recenter without popup text)
         val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -2420,7 +2405,7 @@ class MainActivity : Activity(), SensorEventListener {
         speedButton = transportButton("1.0x").apply {
             setOnClickListener { showSpeedPicker(this) }
         }
-        val backButton = transportButton("↶ 10").apply {
+        val backButton = transportButton("-10s").apply {
             setOnClickListener { performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
         }
         playButton = transportButton("▶", true).apply {
@@ -2432,7 +2417,7 @@ class MainActivity : Activity(), SensorEventListener {
                 }
             }
         }
-        val forwardButton = transportButton("10 ↷").apply {
+        val forwardButton = transportButton("+10s").apply {
             setOnClickListener {
                 val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
                 performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
@@ -2681,7 +2666,7 @@ class MainActivity : Activity(), SensorEventListener {
             enterImmersiveMode()
         } else {
             if (isMotionEnabled) {
-                setMotionTrackingEnabled(false, showFeedback = false)
+                setMotionTrackingEnabled(false)
             }
             if (isFullscreenLandscape) {
                 isFullscreenLandscape = false
