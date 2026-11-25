@@ -2,7 +2,6 @@ package com.example.panoplay
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -26,15 +25,13 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
-import android.provider.DocumentsContract
-import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.system.Os
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -74,8 +71,6 @@ import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
-import java.io.File
-import java.io.FileInputStream
 import java.io.IOException
 import java.util.ArrayList
 import java.util.Locale
@@ -83,119 +78,107 @@ import kotlin.math.abs
 import kotlin.math.min
 
 /**
- * Resolves content:// URIs to direct local FileDataSource whenever accessible,
- * and falls back to duplicated ParcelFileDescriptor streams so rapid seeks never hit EBADF.
+ * Uses Linux Os.pread() stateless positional reads over a duplicated ParcelFileDescriptor.
+ * Because Os.pread() never mutates the kernel file offset, FUSE MediaProvider streams never suffer
+ * from concurrent seek/read corruption (EBADF / EINVAL / ERROR_CODE_IO_UNSPECIFIED) on large MP4s.
  */
 @OptIn(UnstableApi::class)
-private class ReliableVideoDataSource(private val context: Context) : BaseDataSource(/* isNetwork= */ false) {
-    private val defaultDelegate = DefaultDataSource.Factory(context).createDataSource()
-    private var usingDelegate = false
-    private var activeUri: Uri? = null
-    private var dupPfd: ParcelFileDescriptor? = null
-    private var inputStream: FileInputStream? = null
+private class PreadContentDataSource(private val context: Context) : BaseDataSource(/* isNetwork= */ false) {
+    private val fallback = DefaultDataSource.Factory(context).createDataSource()
+    private var usingFallback = false
+    private var uri: Uri? = null
+    private var pfd: ParcelFileDescriptor? = null
+    private var currentOffset: Long = 0L
     private var bytesRemaining: Long = C.LENGTH_UNSET.toLong()
     private var opened = false
 
     override fun open(dataSpec: DataSpec): Long {
-        activeUri = dataSpec.uri
-        val scheme = dataSpec.uri.scheme
-
-        if (scheme == "file" || scheme.isNullOrEmpty()) {
-            usingDelegate = true
-            return defaultDelegate.open(dataSpec)
+        uri = dataSpec.uri
+        if (dataSpec.uri.scheme != "content") {
+            usingFallback = true
+            return fallback.open(dataSpec)
         }
-
-        if (scheme == "content") {
-            usingDelegate = false
-            transferInitializing(dataSpec)
+        usingFallback = false
+        transferInitializing(dataSpec)
+        try {
+            val rawPfd = context.contentResolver.openFileDescriptor(dataSpec.uri, "r")
+                ?: throw IOException("Cannot open file descriptor")
+            val duplicated = rawPfd.dup()
             try {
-                val rawPfd = context.contentResolver.openFileDescriptor(dataSpec.uri, "r")
-                    ?: throw IOException("Cannot open descriptor for ${dataSpec.uri}")
-                val duplicated = rawPfd.dup()
-                try {
-                    rawPfd.close()
-                } catch (_: IOException) {
-                }
-                dupPfd = duplicated
-                val fis = FileInputStream(duplicated.fileDescriptor)
-                inputStream = fis
-
-                if (dataSpec.position > 0L) {
-                    var skippedTotal = 0L
-                    while (skippedTotal < dataSpec.position) {
-                        val step = fis.skip(dataSpec.position - skippedTotal)
-                        if (step <= 0L) {
-                            fis.channel.position(dataSpec.position)
-                            break
-                        }
-                        skippedTotal += step
-                    }
-                }
-
-                val statSize = duplicated.statSize
-                bytesRemaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
-                    dataSpec.length
-                } else if (statSize >= 0L) {
-                    (statSize - dataSpec.position).coerceAtLeast(0L)
-                } else {
-                    C.LENGTH_UNSET.toLong()
-                }
-                opened = true
-                transferStarted(dataSpec)
-                return bytesRemaining
-            } catch (e: Exception) {
-                close()
-                usingDelegate = true
-                return defaultDelegate.open(dataSpec)
+                rawPfd.close()
+            } catch (_: IOException) {
             }
-        }
+            pfd = duplicated
+            currentOffset = dataSpec.position
 
-        usingDelegate = true
-        return defaultDelegate.open(dataSpec)
+            // Verify Os.pread works on this descriptor (pipes/sockets throw ESPIPE and fall back cleanly)
+            val probe = ByteArray(1)
+            val probeRead = Os.pread(duplicated.fileDescriptor, probe, 0, 1, currentOffset)
+            if (probeRead < 0) {
+                throw IOException("Probe pread failed")
+            }
+
+            val statSize = duplicated.statSize
+            bytesRemaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
+                dataSpec.length
+            } else if (statSize > 0L) {
+                (statSize - dataSpec.position).coerceAtLeast(0L)
+            } else {
+                C.LENGTH_UNSET.toLong()
+            }
+            opened = true
+            transferStarted(dataSpec)
+            return bytesRemaining
+        } catch (_: Throwable) {
+            close()
+            usingFallback = true
+            return fallback.open(dataSpec)
+        }
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-        if (usingDelegate) return defaultDelegate.read(buffer, offset, length)
+        if (usingFallback) return fallback.read(buffer, offset, length)
         if (length == 0) return 0
         if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
 
+        val descriptor = pfd?.fileDescriptor ?: return C.RESULT_END_OF_INPUT
         val toRead = if (bytesRemaining == C.LENGTH_UNSET.toLong()) {
             length
         } else {
             min(bytesRemaining, length.toLong()).toInt()
         }
-        val stream = inputStream ?: return C.RESULT_END_OF_INPUT
-        val readBytes = stream.read(buffer, offset, toRead)
-        if (readBytes == -1) {
-            return C.RESULT_END_OF_INPUT
+
+        return try {
+            val readCount = Os.pread(descriptor, buffer, offset, toRead, currentOffset)
+            if (readCount <= 0) {
+                C.RESULT_END_OF_INPUT
+            } else {
+                currentOffset += readCount.toLong()
+                if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
+                    bytesRemaining -= readCount.toLong()
+                }
+                bytesTransferred(readCount)
+                readCount
+            }
+        } catch (e: Exception) {
+            throw IOException("pread failed at offset $currentOffset", e)
         }
-        if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
-            bytesRemaining -= readBytes.toLong()
-        }
-        bytesTransferred(readBytes)
-        return readBytes
     }
 
-    override fun getUri(): Uri? = if (usingDelegate) defaultDelegate.uri else activeUri
+    override fun getUri(): Uri? = if (usingFallback) fallback.uri else uri
 
     override fun close() {
-        activeUri = null
-        if (usingDelegate) {
-            usingDelegate = false
-            defaultDelegate.close()
+        uri = null
+        if (usingFallback) {
+            usingFallback = false
+            fallback.close()
             return
         }
         try {
-            inputStream?.close()
+            pfd?.close()
         } catch (_: IOException) {
         } finally {
-            inputStream = null
-        }
-        try {
-            dupPfd?.close()
-        } catch (_: IOException) {
-        } finally {
-            dupPfd = null
+            pfd = null
         }
         if (opened) {
             opened = false
@@ -204,7 +187,7 @@ private class ReliableVideoDataSource(private val context: Context) : BaseDataSo
     }
 
     class Factory(private val context: Context) : DataSource.Factory {
-        override fun createDataSource(): DataSource = ReliableVideoDataSource(context)
+        override fun createDataSource(): DataSource = PreadContentDataSource(context)
     }
 }
 
@@ -820,7 +803,8 @@ class MainActivity : Activity(), SensorEventListener {
     private var pendingMediaUri: Uri? = null
     private var activePlaybackUri: Uri? = null
     private var lastRequestedSeekMs: Long = -1L
-    private var ioRetryCount = 0
+    private var consecutiveErrorCount = 0
+    private var lastErrorTimeMs = 0L
 
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
@@ -1024,7 +1008,8 @@ class MainActivity : Activity(), SensorEventListener {
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        val dataSourceFactory = ReliableVideoDataSource.Factory(this)
+        // Stateless Os.pread() DataSource prevents MediaProvider file-offset corruption during playback & seeks
+        val dataSourceFactory = PreadContentDataSource.Factory(this)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
         player = ExoPlayer.Builder(this, renderersFactory)
@@ -1047,7 +1032,7 @@ class MainActivity : Activity(), SensorEventListener {
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) {
-                    ioRetryCount = 0
+                    consecutiveErrorCount = 0
                     lastRequestedSeekMs = -1L
                     placeholder.visibility = View.GONE
                     val resolvedName = currentVideoName.ifBlank { "Now playing" }
@@ -1076,8 +1061,14 @@ class MainActivity : Activity(), SensorEventListener {
 
             override fun onPlayerError(error: PlaybackException) {
                 val uri = activePlaybackUri
-                if (uri != null && ioRetryCount < 3) {
-                    ioRetryCount++
+                val now = SystemClock.uptimeMillis()
+                if (now - lastErrorTimeMs > 4000L) {
+                    consecutiveErrorCount = 0
+                }
+                lastErrorTimeMs = now
+
+                if (uri != null && consecutiveErrorCount < 4) {
+                    consecutiveErrorCount++
                     val targetPosition = if (lastRequestedSeekMs >= 0L) {
                         lastRequestedSeekMs
                     } else {
@@ -1095,13 +1086,14 @@ class MainActivity : Activity(), SensorEventListener {
                             }
                             player.playWhenReady = true
                         }
-                    }, 100L)
+                    }, 80L)
                     return
                 }
 
+                val rootCauseMsg = error.cause?.message ?: error.errorCodeName
                 Toast.makeText(
                     this@MainActivity,
-                    "Can't play this video: ${error.errorCodeName}",
+                    "Playback error: $rootCauseMsg",
                     Toast.LENGTH_LONG
                 ).show()
                 if (activePlaybackUri == null) {
@@ -1112,92 +1104,9 @@ class MainActivity : Activity(), SensorEventListener {
         mainHandler.post(progressUpdater)
     }
 
-    private fun resolveBestPlaybackUri(documentUri: Uri): Uri {
-        try {
-            val filePath = resolveLocalFilePath(documentUri)
-            if (!filePath.isNullOrBlank()) {
-                val file = File(filePath)
-                if (file.exists() && file.canRead() && file.length() > 0L) {
-                    return Uri.fromFile(file)
-                }
-            }
-        } catch (_: Exception) {
-        }
-        return documentUri
-    }
-
-    private fun resolveLocalFilePath(uri: Uri): String? {
-        if ("file".equals(uri.scheme, ignoreCase = true)) {
-            return uri.path
-        }
-        if (DocumentsContract.isDocumentUri(this, uri)) {
-            val docId = DocumentsContract.getDocumentId(uri)
-            val authority = uri.authority.orEmpty()
-            if (authority == "com.android.externalstorage.documents") {
-                val parts = docId.split(":")
-                if (parts.size >= 2) {
-                    val type = parts[0]
-                    val relPath = parts[1]
-                    if ("primary".equals(type, ignoreCase = true)) {
-                        @Suppress("DEPRECATION")
-                        return "${Environment.getExternalStorageDirectory()}/$relPath"
-                    } else {
-                        val storageFile = File("/storage/$type/$relPath")
-                        if (storageFile.exists()) return storageFile.absolutePath
-                    }
-                }
-            } else if (authority == "com.android.providers.downloads.documents") {
-                if (docId.startsWith("raw:")) {
-                    return docId.removePrefix("raw:")
-                }
-                val idLong = docId.toLongOrNull()
-                if (idLong != null) {
-                    val contentUri = ContentUris.withAppendedId(
-                        Uri.parse("content://downloads/public_downloads"),
-                        idLong
-                    )
-                    queryDataColumn(contentUri, null, null)?.let { return it }
-                }
-            } else if (authority == "com.android.providers.media.documents") {
-                val parts = docId.split(":")
-                if (parts.size >= 2 && parts[0] == "video") {
-                    val contentUri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                    queryDataColumn(contentUri, "_id=?", arrayOf(parts[1]))?.let { return it }
-                }
-            }
-        }
-        if ("content".equals(uri.scheme, ignoreCase = true)) {
-            queryDataColumn(uri, null, null)?.let { return it }
-        }
-        return null
-    }
-
-    @Suppress("DEPRECATION")
-    private fun queryDataColumn(uri: Uri, selection: String?, selectionArgs: Array<String>?): String? {
-        var cursor: Cursor? = null
-        return try {
-            cursor = contentResolver.query(
-                uri,
-                arrayOf(MediaStore.MediaColumns.DATA),
-                selection,
-                selectionArgs,
-                null
-            )
-            if (cursor != null && cursor.moveToFirst()) {
-                val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
-                if (idx >= 0) cursor.getString(idx) else null
-            } else null
-        } catch (_: Exception) {
-            null
-        } finally {
-            cursor?.close()
-        }
-    }
-
     private fun performSafeSeek(targetMs: Long) {
         val clamped = targetMs.coerceAtLeast(0L)
         lastRequestedSeekMs = clamped
-        ioRetryCount = 0
         player.seekTo(clamped)
     }
 
@@ -2586,20 +2495,19 @@ class MainActivity : Activity(), SensorEventListener {
         if (::fullscreenTitleView.isInitialized) fullscreenTitleView.text = currentVideoName
         placeholder.visibility = View.VISIBLE
 
-        val playbackUri = resolveBestPlaybackUri(uri)
         val activeSurface = vrOutputSurface ?: vrSurfaceView.getVideoSurface()
         if (activeSurface != null && activeSurface.isValid) {
             player.setVideoSurface(activeSurface)
-            startPlayback(playbackUri)
+            startPlayback(uri)
         } else {
-            pendingMediaUri = playbackUri
+            pendingMediaUri = uri
         }
     }
 
     private fun startPlayback(uri: Uri) {
         activePlaybackUri = uri
         lastRequestedSeekMs = -1L
-        ioRetryCount = 0
+        consecutiveErrorCount = 0
         lastRenderedFrames = 0
         lastFpsCheckTimeMs = 0L
         player.stop()
