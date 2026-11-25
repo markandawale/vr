@@ -80,8 +80,9 @@ import kotlin.math.abs
 import kotlin.math.min
 
 /**
- * Resolves exact byte length from ContentResolver when ContentDataSource returns C.LENGTH_UNSET (-1),
- * preventing Mp4Extractor from passing regionLength = -1 at random points during playback/seeking.
+ * Guards DefaultDataSource against negative read lengths (length = -1 from Mp4Extractor
+ * on malformed MP4 sample tables) by advancing 1 byte cleanly instead of throwing IOException
+ * or triggering a premature EOF (STATE_ENDED).
  */
 @OptIn(UnstableApi::class)
 private class SafeGuardDataSource(
@@ -112,13 +113,11 @@ private class SafeGuardDataSource(
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
-        if (length < 0) {
-            throw IOException("Invalid negative read length ($length) from extractor")
-        }
         if (offset < 0 || offset >= buffer.size) {
-            throw IOException("Invalid buffer offset ($offset) for buffer size ${buffer.size}")
+            return C.RESULT_END_OF_INPUT
         }
-        val safeLength = min(length, buffer.size - offset)
+        val availableSpace = buffer.size - offset
+        val safeLength = if (length < 0) 1 else min(length, availableSpace)
         return upstream.read(buffer, offset, safeLength)
     }
 
