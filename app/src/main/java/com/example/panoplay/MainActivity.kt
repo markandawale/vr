@@ -72,6 +72,132 @@ import kotlin.math.abs
 import kotlin.math.min
 
 /**
+ * Exact Material vector icons matching reference screenshot (1000063554.jpg)
+ * for Speedometer, Recenter Crosshair, and Motion Compass pills.
+ */
+private class PillIconDrawable(
+    private val iconType: Type,
+    private val tintColor: Int
+) : Drawable() {
+
+    enum class Type { SPEED, RECENTER, MOTION }
+
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = tintColor
+        style = Paint.Style.FILL
+    }
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = tintColor
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val path = Path()
+    private val oval = RectF()
+
+    override fun draw(canvas: Canvas) {
+        val w = bounds.width().toFloat()
+        val h = bounds.height().toFloat()
+        if (w <= 0f || h <= 0f) return
+        val cx = w * 0.5f
+        val cy = h * 0.5f
+        val s = min(w, h)
+
+        fillPaint.color = tintColor
+        strokePaint.color = tintColor
+
+        when (iconType) {
+            Type.RECENTER -> {
+                // Exact crosshair ring + center dot + 4 outer ticks
+                strokePaint.strokeWidth = s * 0.11f
+                val r = s * 0.30f
+                canvas.drawCircle(cx, cy, r, strokePaint)
+                canvas.drawCircle(cx, cy, s * 0.11f, fillPaint)
+
+                val tickStart = r + s * 0.02f
+                val tickEnd = s * 0.46f
+                // Top, Bottom, Left, Right ticks
+                canvas.drawLine(cx, cy - tickStart, cx, cy - tickEnd, strokePaint)
+                canvas.drawLine(cx, cy + tickStart, cx, cy + tickEnd, strokePaint)
+                canvas.drawLine(cx - tickStart, cy, cx - tickEnd, cy, strokePaint)
+                canvas.drawLine(cx + tickStart, cy, cx + tickEnd, cy, strokePaint)
+            }
+            Type.MOTION -> {
+                // Solid circle with compass diamond cutout (EvenOdd fill)
+                val r = s * 0.42f
+                path.reset()
+                path.fillType = Path.FillType.EVEN_ODD
+                path.addCircle(cx, cy, r, Path.Direction.CW)
+
+                // Diagonal compass needle diamond (NE to SW)
+                val tipDist = r * 0.64f
+                val sideDist = r * 0.23f
+                val diag = 0.7071f
+                val neX = cx + tipDist * diag
+                val neY = cy - tipDist * diag
+                val swX = cx - tipDist * diag
+                val swY = cy + tipDist * diag
+                val nwX = cx - sideDist * diag
+                val nwY = cy - sideDist * diag
+                val seX = cx + sideDist * diag
+                val seY = cy + sideDist * diag
+
+                path.moveTo(neX, neY)
+                path.lineTo(seX, seY)
+                path.lineTo(swX, swY)
+                path.lineTo(nwX, nwY)
+                path.close()
+                canvas.drawPath(path, fillPaint)
+
+                // Center pivot dot inside compass needle
+                canvas.drawCircle(cx, cy, r * 0.11f, fillPaint)
+            }
+            Type.SPEED -> {
+                // Speedometer half-gauge arc + solid lower base + angled needle
+                val gaugeCy = cy + s * 0.16f
+                val outerR = s * 0.40f
+                strokePaint.strokeWidth = s * 0.10f
+                oval.set(cx - outerR, gaugeCy - outerR, cx + outerR, gaugeCy + outerR)
+                canvas.drawArc(oval, 185f, 170f, false, strokePaint)
+
+                // Solid lower arch body with needle cutout
+                path.reset()
+                path.fillType = Path.FillType.EVEN_ODD
+                val innerR = s * 0.25f
+                oval.set(cx - innerR, gaugeCy - innerR, cx + innerR, gaugeCy + innerR)
+                path.addArc(oval, 180f, 180f)
+                path.lineTo(cx + innerR, gaugeCy + s * 0.06f)
+                path.lineTo(cx - innerR, gaugeCy + s * 0.06f)
+                path.close()
+                canvas.drawPath(path, fillPaint)
+
+                // Speedometer needle pointing top-right (~45 deg)
+                strokePaint.strokeWidth = s * 0.11f
+                canvas.drawLine(
+                    cx - s * 0.03f,
+                    gaugeCy - s * 0.02f,
+                    cx + s * 0.23f,
+                    gaugeCy - s * 0.28f,
+                    strokePaint
+                )
+            }
+        }
+    }
+
+    override fun setAlpha(alpha: Int) {
+        fillPaint.alpha = alpha
+        strokePaint.alpha = alpha
+    }
+
+    override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {
+        fillPaint.colorFilter = colorFilter
+        strokePaint.colorFilter = colorFilter
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
+}
+
+/**
  * Exact Material / Google Files vector icons for Play, Pause, Rewind, and Forward.
  */
 private class TransportIconDrawable(
@@ -255,7 +381,7 @@ private class VolumeVectorDrawable(
 }
 
 /**
- * Custom sleek cinema-style seek slider for fullscreen mode.
+ * Custom sleek cinema-style seek slider for fullscreen mode (extended closer to left/right timestamps).
  */
 private class CinemaSeekBar(context: Context) : View(context) {
     var max: Int = 1000
@@ -300,7 +426,7 @@ private class CinemaSeekBar(context: Context) : View(context) {
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
 
-        val sidePad = 10f * density
+        val sidePad = 6.5f * density
         val usableWidth = (w - sidePad * 2f).coerceAtLeast(1f)
         val centerY = h * 0.5f
 
@@ -318,14 +444,14 @@ private class CinemaSeekBar(context: Context) : View(context) {
         canvas.drawRoundRect(fillRect, radius, radius, trackFillPaint)
 
         if (isDragging) {
-            canvas.drawCircle(thumbX, centerY, 14f * density, thumbGlowPaint)
+            canvas.drawCircle(thumbX, centerY, 13f * density, thumbGlowPaint)
         }
         val thumbRadius = (if (isDragging) 8.5f else 6.5f) * density
         canvas.drawCircle(thumbX, centerY, thumbRadius, thumbCorePaint)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        val sidePad = 10f * density
+        val sidePad = 6.5f * density
         val usableWidth = (width - sidePad * 2f).coerceAtLeast(1f)
 
         fun computeProgress(rawX: Float): Int {
@@ -854,6 +980,14 @@ class MainActivity : Activity(), SensorEventListener {
         mainHandler.post(progressUpdater)
     }
 
+    private fun setPillLeftIcon(view: TextView, icon: PillIconDrawable, tintColor: Int) {
+        icon.setColorFilter(tintColor, android.graphics.PorterDuff.Mode.SRC_IN)
+        val iconSize = dp(17)
+        icon.setBounds(0, 0, iconSize, iconSize)
+        view.compoundDrawablePadding = dp(7)
+        view.setCompoundDrawables(icon, null, null, null)
+    }
+
     private fun setMotionTrackingEnabled(enabled: Boolean, showFeedback: Boolean = true) {
         if (enabled && gyroSensor == null) {
             Toast.makeText(this, "Gyroscope sensor not available on this device", Toast.LENGTH_SHORT).show()
@@ -867,11 +1001,17 @@ class MainActivity : Activity(), SensorEventListener {
             sensorManager.unregisterListener(this)
         }
         if (::overlayMotionButton.isInitialized) {
+            val textColor = if (enabled) Color.rgb(14, 16, 22) else Color.WHITE
             overlayMotionButton.background = rounded(
                 if (enabled) Color.rgb(122, 146, 255) else Color.argb(145, 28, 32, 42),
                 22
             )
-            overlayMotionButton.setTextColor(if (enabled) Color.rgb(14, 16, 22) else Color.WHITE)
+            overlayMotionButton.setTextColor(textColor)
+            setPillLeftIcon(
+                overlayMotionButton,
+                PillIconDrawable(PillIconDrawable.Type.MOTION, textColor),
+                textColor
+            )
         }
         if (showFeedback) {
             showCenterHud(if (enabled) "MOTION ON" else "MOTION OFF", 750L)
@@ -886,8 +1026,8 @@ class MainActivity : Activity(), SensorEventListener {
         if (lastGyroTimestampNs != 0L) {
             val dtSec = (ts - lastGyroTimestampNs) * 1e-9f
             if (dtSec > 0f && dtSec < 0.25f) {
-                val rotX = event.values[0] // device pitch rate (rad/s)
-                val rotY = event.values[1] // device yaw rate (rad/s)
+                val rotX = event.values[0]
+                val rotY = event.values[1]
 
                 @Suppress("DEPRECATION")
                 val displayRotation = windowManager.defaultDisplay?.rotation ?: Surface.ROTATION_0
@@ -912,7 +1052,6 @@ class MainActivity : Activity(), SensorEventListener {
                     }
                 }
 
-                // Deadzone tiny hand tremor (< 0.015 rad/s) so stationary frame stays rock steady
                 val filteredYaw = if (abs(yawRateRad) < 0.015f) 0f else yawRateRad
                 val filteredPitch = if (abs(pitchRateRad) < 0.015f) 0f else pitchRateRad
 
@@ -1760,7 +1899,7 @@ class MainActivity : Activity(), SensorEventListener {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP)
         )
 
-        // 2. Fullscreen Center Transport Row (Reduced spacing between Rewind, Play/Pause, and Forward)
+        // 2. Fullscreen Center Transport Row
         fullscreenCenterControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1815,11 +1954,11 @@ class MainActivity : Activity(), SensorEventListener {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
         )
 
-        // 3. Fullscreen Bottom Dock
+        // 3. Fullscreen Bottom Dock (Longer slider extending closer to timestamps + Reference icons on pills)
         fullscreenBottomControls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(16), dp(14), dp(16), dp(18))
+            setPadding(dp(12), dp(14), dp(12), dp(18))
             background = GradientDrawable(
                 GradientDrawable.Orientation.BOTTOM_TOP,
                 intArrayOf(Color.argb(190, 8, 10, 14), Color.TRANSPARENT)
@@ -1862,15 +2001,20 @@ class MainActivity : Activity(), SensorEventListener {
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
             includeFontPadding = false
         }
-        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(dp(46), dp(34)))
+        // WRAP_CONTENT timestamps with tight 5dp margin so the slider spans wide across both sides
+        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
+            rightMargin = dp(5)
+        })
         fullscreenSeekRow.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(34), 1f))
-        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(dp(46), dp(34)))
+        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
+            leftMargin = dp(5)
+        })
         fullscreenBottomControls.addView(
             fullscreenSeekRow,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
-        // Bottom pills row below slider: Speed | Recenter | Motion | Landscape
+        // Bottom pills row below slider with exact reference icons (1000063554.jpg)
         val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1878,18 +2022,20 @@ class MainActivity : Activity(), SensorEventListener {
         }
         overlaySpeedButton = text("1.0x", 11.5f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setPadding(dp(13), dp(8), dp(14), dp(8))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
+            setPillLeftIcon(this, PillIconDrawable(PillIconDrawable.Type.SPEED, Color.WHITE), Color.WHITE)
             setOnClickListener { showSpeedPicker(this) }
         }
         overlayRecenterButton = text("Recenter", 11.5f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setPadding(dp(13), dp(8), dp(14), dp(8))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
+            setPillLeftIcon(this, PillIconDrawable(PillIconDrawable.Type.RECENTER, Color.WHITE), Color.WHITE)
             setOnClickListener {
                 if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
                     vrSurfaceView.resetView()
@@ -1899,10 +2045,11 @@ class MainActivity : Activity(), SensorEventListener {
         }
         overlayMotionButton = text("Motion", 11.5f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setPadding(dp(13), dp(8), dp(14), dp(8))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
+            setPillLeftIcon(this, PillIconDrawable(PillIconDrawable.Type.MOTION, Color.WHITE), Color.WHITE)
             setOnClickListener { setMotionTrackingEnabled(!isMotionEnabled) }
         }
         overlayRotateButton = text("Landscape", 11.5f, Color.WHITE, true).apply {
@@ -1919,7 +2066,7 @@ class MainActivity : Activity(), SensorEventListener {
             bottomPillsRow.addView(
                 pill,
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    if (idx < bottomPills.lastIndex) rightMargin = dp(7)
+                    if (idx < bottomPills.lastIndex) rightMargin = dp(6)
                 }
             )
         }
