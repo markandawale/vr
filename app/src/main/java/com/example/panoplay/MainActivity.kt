@@ -2,6 +2,8 @@ package com.example.panoplay
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -30,6 +32,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.util.Log
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -889,7 +892,6 @@ class MainActivity : Activity(), SensorEventListener {
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        // Official Media3 DefaultDataSource + tuned LoadControl (prevents native crashes and buffer starvation on long MP4s)
         val dataSourceFactory = DefaultDataSource.Factory(this)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
         val loadControl = DefaultLoadControl.Builder()
@@ -981,18 +983,84 @@ class MainActivity : Activity(), SensorEventListener {
                     return
                 }
 
-                val rootCauseMsg = error.cause?.message ?: error.errorCodeName
-                Toast.makeText(
-                    this@MainActivity,
-                    "Playback error: $rootCauseMsg",
-                    Toast.LENGTH_LONG
-                ).show()
+                showFullErrorDialog(error)
                 if (activePlaybackUri == null) {
                     placeholder.visibility = View.VISIBLE
                 }
             }
         })
         mainHandler.post(progressUpdater)
+    }
+
+    private fun showFullErrorDialog(error: PlaybackException) {
+        val fullTrace = Log.getStackTraceString(error)
+        val summary = buildString {
+            appendLine("Error Code: ${error.errorCodeName} (${error.errorCode})")
+            appendLine("Message: ${error.message ?: "None"}")
+            error.cause?.let { cause ->
+                appendLine("Root Cause: ${cause.javaClass.name}: ${cause.message}")
+            }
+            appendLine()
+            appendLine("--- Full Stack Trace ---")
+            append(fullTrace)
+        }
+
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(16), dp(18), dp(14))
+            background = rounded(Color.rgb(20, 23, 29), 18)
+        }
+
+        val title = text("PLAYBACK ERROR LOG", 14f, Color.rgb(255, 79, 94), true).apply {
+            letterSpacing = 0.06f
+            setPadding(0, 0, 0, dp(10))
+        }
+        outer.addView(title)
+
+        val scrollView = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = true
+            background = rounded(Color.rgb(13, 15, 20), 12)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+        }
+        val logText = TextView(this).apply {
+            text = summary
+            textSize = 11f
+            setTextColor(Color.rgb(230, 234, 242))
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+        }
+        scrollView.addView(logText)
+        val maxScrollHeight = (resources.displayMetrics.heightPixels * 0.48f).toInt()
+        outer.addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxScrollHeight))
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(outer)
+            .create()
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val copyBtn = pillButton("COPY ERROR", false).apply {
+            setOnClickListener {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("PanoPlay Error", summary))
+                Toast.makeText(this@MainActivity, "Error log copied", Toast.LENGTH_SHORT).show()
+            }
+        }
+        val closeBtn = pillButton("CLOSE", true).apply {
+            setOnClickListener { dialog.dismiss() }
+        }
+        btnRow.addView(copyBtn, LinearLayout.LayoutParams(0, dp(40), 1f).apply { rightMargin = dp(8) })
+        btnRow.addView(closeBtn, LinearLayout.LayoutParams(0, dp(40), 1f))
+        outer.addView(
+            btnRow,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(12)
+            }
+        )
+
+        dialog.show()
     }
 
     private fun performSafeSeek(targetMs: Long) {
