@@ -117,6 +117,10 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         postGl { renderEngine.setVideoSize(width, height, rotationDegrees, pixelRatio) }
     }
 
+    fun applyGyroDelta(deltaYawDeg: Float, deltaPitchDeg: Float) {
+        postGl { renderEngine.applyGyroDelta(deltaYawDeg, deltaPitchDeg) }
+    }
+
     fun resetView() {
         postGl { renderEngine.resetView() }
     }
@@ -162,12 +166,10 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 return true
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
-                // Second finger touched down: lock out single-finger panning for this gesture
                 wasPinching = true
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                // Never pan if pinching occurred or more than 1 finger is on screen
                 if (wasPinching || scaleDetector.isInProgress || event.pointerCount > 1) {
                     return true
                 }
@@ -185,7 +187,6 @@ class VrVideoSurfaceView @JvmOverloads constructor(
                 return true
             }
             MotionEvent.ACTION_POINTER_UP -> {
-                // Sync remaining finger's position so lifting one finger never causes a jump
                 val liftedIndex = event.actionIndex
                 val liftedId = event.getPointerId(liftedIndex)
                 val newIndex = if (liftedIndex == 0) 1 else 0
@@ -549,6 +550,13 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             val sensitivity = (95f / viewWidth.coerceAtLeast(1)) * zoomScale
             targetYaw -= dx * sensitivity
             targetPitch = (targetPitch + dy * sensitivity).coerceIn(-82f, 82f)
+            clamp180Bounds()
+        }
+
+        fun applyGyroDelta(deltaYawDeg: Float, deltaPitchDeg: Float) {
+            if (projection == Projection.FLAT) return
+            targetYaw += deltaYawDeg
+            targetPitch = (targetPitch + deltaPitchDeg).coerceIn(-82f, 82f)
             clamp180Bounds()
         }
 
