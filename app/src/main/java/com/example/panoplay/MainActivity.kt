@@ -20,7 +20,11 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.media.AudioAttributes as NativeAudioAttributes
+import android.media.AudioFormat as NativeAudioFormat
 import android.media.AudioManager
+import android.media.AudioTrack
+import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
@@ -73,6 +77,7 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import java.io.IOException
+import java.nio.ByteBuffer
 import java.util.ArrayList
 import java.util.IdentityHashMap
 import java.util.Locale
@@ -80,9 +85,452 @@ import kotlin.math.abs
 import kotlin.math.min
 
 /**
- * Guards DefaultDataSource against negative read lengths (length = -1 from Mp4Extractor
- * on malformed MP4 sample tables) by advancing 1 byte cleanly instead of throwing IOException
- * or triggering a premature EOF (STATE_ENDED).
+ * Android Native MediaExtractor + MediaCodec playback engine for MP4 files
+ * with broken/negative sample sizes that stall ExoPlayer's Mp4Extractor.
+ */
+private class NativeStagefrightEngine(
+    private val context: Context,
+    private val onReady: (durationMs: Long) -> Unit,
+    private val onEnded: () -> Unit,
+    private val onError: (Throwable) -> Unit
+) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var videoExtractor: MediaExtractor? = null
+    private var audioExtractor: MediaExtractor? = null
+    private var videoCodec: MediaCodec? = null
+    private var audioCodec: MediaCodec? = null
+    private var audioTrack: AudioTrack? = null
+
+    @Volatile private var isReleased = false
+    @Volatile private var isPlayingState = false
+    @Volatile private var isPausedByUser = false
+    @Volatile private var durationUs = 0L
+    @Volatile private var currentPositionUs = 0L
+    @Volatile private var speedFactor = 1.0f
+    @Volatile private var pendingSeekUs = -1L
+
+    private var currentUri: Uri? = null
+    private var currentSurface: Surface? = null
+    private var videoThread: Thread? = null
+    private var audioThread: Thread? = null
+
+    fun isPlaying(): Boolean = isPlayingState && !isReleased
+    fun getCurrentPositionMs(): Long = (currentPositionUs / 1000L).coerceAtLeast(0L)
+    fun getDurationMs(): Long = (durationUs / 1000L).coerceAtLeast(0L)
+
+    fun setPlaybackSpeed(speed: Float) {
+        speedFactor = speed.coerceIn(0.25f, 4.0f)
+    }
+
+    fun start(uri: Uri, surface: Surface?, startPositionMs: Long) {
+        release()
+        if (surface == null || !surface.isValid) {
+            onError(IOException("Target video surface is not available"))
+            return
+        }
+        isReleased = false
+        currentUri = uri
+        currentSurface = surface
+        currentPositionUs = (startPositionMs.coerceAtLeast(0L)) * 1000L
+        isPausedByUser = false
+        isPlayingState = true
+
+        videoThread = Thread({
+            runVideoLoop(uri, surface, currentPositionUs)
+        }, "PanoPlay-NativeVideo").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    fun play() {
+        isPausedByUser = false
+        isPlayingState = true
+        try {
+            audioTrack?.play()
+        } catch (_: IllegalStateException) {
+        }
+    }
+
+    fun pause() {
+        isPausedByUser = true
+        isPlayingState = false
+        try {
+            audioTrack?.pause()
+        } catch (_: IllegalStateException) {
+        }
+    }
+
+    fun seekTo(positionMs: Long) {
+        val targetUs = positionMs.coerceAtLeast(0L) * 1000L
+        currentPositionUs = targetUs
+        pendingSeekUs = targetUs
+        if (!isPausedByUser) {
+            isPlayingState = true
+        }
+    }
+
+    fun release() {
+        isReleased = true
+        isPlayingState = false
+        pendingSeekUs = -1L
+
+        try {
+            videoThread?.interrupt()
+            audioThread?.interrupt()
+        } catch (_: Exception) {
+        }
+        videoThread = null
+        audioThread = null
+
+        safeReleaseCodecAndExtractor(videoCodec, videoExtractor)
+        videoCodec = null
+        videoExtractor = null
+
+        safeReleaseCodecAndExtractor(audioCodec, audioExtractor)
+        audioCodec = null
+        audioExtractor = null
+
+        try {
+            audioTrack?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            audioTrack?.release()
+        } catch (_: Exception) {
+        }
+        audioTrack = null
+    }
+
+    private fun safeReleaseCodecAndExtractor(codec: MediaCodec?, extractor: MediaExtractor?) {
+        try {
+            codec?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            codec?.release()
+        } catch (_: Exception) {
+        }
+        try {
+            extractor?.release()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun runVideoLoop(uri: Uri, surface: Surface, initialPosUs: Long) {
+        val vExtractor = MediaExtractor()
+        var vCodec: MediaCodec? = null
+        var aExtractor: MediaExtractor? = null
+        var aCodec: MediaCodec? = null
+        var aTrack: AudioTrack? = null
+
+        try {
+            vExtractor.setDataSource(context, uri, null)
+            var vTrackIndex = -1
+            var vFormat: MediaFormat? = null
+            var aTrackIndex = -1
+            var aFormat: MediaFormat? = null
+
+            for (i in 0 until vExtractor.trackCount) {
+                val fmt = vExtractor.getTrackFormat(i)
+                val mime = fmt.getString(MediaFormat.KEY_MIME).orEmpty()
+                if (vTrackIndex < 0 && mime.startsWith("video/")) {
+                    vTrackIndex = i
+                    vFormat = fmt
+                    if (fmt.containsKey(MediaFormat.KEY_DURATION)) {
+                        durationUs = maxOf(durationUs, fmt.getLong(MediaFormat.KEY_DURATION))
+                    }
+                } else if (aTrackIndex < 0 && mime.startsWith("audio/")) {
+                    aTrackIndex = i
+                    aFormat = fmt
+                    if (fmt.containsKey(MediaFormat.KEY_DURATION)) {
+                        durationUs = maxOf(durationUs, fmt.getLong(MediaFormat.KEY_DURATION))
+                    }
+                }
+            }
+
+            if (vTrackIndex < 0 || vFormat == null) {
+                throw IOException("No video track found in media")
+            }
+
+            videoExtractor = vExtractor
+            vExtractor.selectTrack(vTrackIndex)
+            if (initialPosUs > 0L) {
+                vExtractor.seekTo(initialPosUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+            }
+
+            val vMime = vFormat.getString(MediaFormat.KEY_MIME).orEmpty()
+            val decoder = MediaCodec.createDecoderByType(vMime)
+            vCodec = decoder
+            videoCodec = decoder
+            decoder.configure(vFormat, surface, null, 0)
+            decoder.start()
+
+            if (aTrackIndex >= 0 && aFormat != null) {
+                val audioEx = MediaExtractor().apply {
+                    setDataSource(context, uri, null)
+                    selectTrack(aTrackIndex)
+                    if (initialPosUs > 0L) {
+                        seekTo(initialPosUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                    }
+                }
+                audioExtractor = audioEx
+                val aMime = aFormat.getString(MediaFormat.KEY_MIME).orEmpty()
+                val adec = MediaCodec.createDecoderByType(aMime).apply {
+                    configure(aFormat, null, null, 0)
+                    start()
+                }
+                aCodec = adec
+                audioCodec = adec
+
+                val sampleRate = if (aFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                    aFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                } else {
+                    48000
+                }
+                val channelCount = if (aFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                    aFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                } else {
+                    2
+                }
+                val channelMask = if (channelCount == 1) {
+                    NativeAudioFormat.CHANNEL_OUT_MONO
+                } else {
+                    NativeAudioFormat.CHANNEL_OUT_STEREO
+                }
+                val minBuf = AudioTrack.getMinBufferSize(
+                    sampleRate,
+                    channelMask,
+                    NativeAudioFormat.ENCODING_PCM_16BIT
+                ).coerceAtLeast(4096)
+
+                val track = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        NativeAudioAttributes.Builder()
+                            .setUsage(NativeAudioAttributes.USAGE_MEDIA)
+                            .setContentType(NativeAudioAttributes.CONTENT_TYPE_MOVIE)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        NativeAudioFormat.Builder()
+                            .setEncoding(NativeAudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(channelMask)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(minBuf * 2)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+                aTrack = track
+                audioTrack = track
+                track.play()
+
+                audioThread = Thread({
+                    runAudioLoop(audioEx, adec, track)
+                }, "PanoPlay-NativeAudio").apply {
+                    isDaemon = true
+                    start()
+                }
+            }
+
+            mainHandler.post {
+                if (!isReleased) onReady((durationUs / 1000L).coerceAtLeast(0L))
+            }
+
+            val bufferInfo = MediaCodec.BufferInfo()
+            var inputDone = false
+            var playbackStartWallMs = SystemClock.elapsedRealtime()
+            var playbackStartMediaUs = initialPosUs
+
+            while (!isReleased) {
+                if (isPausedByUser) {
+                    Thread.sleep(40L)
+                    playbackStartWallMs = SystemClock.elapsedRealtime()
+                    playbackStartMediaUs = currentPositionUs
+                    continue
+                }
+
+                val seekTarget = pendingSeekUs
+                if (seekTarget >= 0L) {
+                    pendingSeekUs = -1L
+                    try {
+                        vExtractor.seekTo(seekTarget, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                        decoder.flush()
+                        inputDone = false
+                        currentPositionUs = seekTarget
+                        playbackStartWallMs = SystemClock.elapsedRealtime()
+                        playbackStartMediaUs = seekTarget
+                    } catch (_: Exception) {
+                    }
+                }
+
+                if (!inputDone) {
+                    val inIndex = decoder.dequeueInputBuffer(10_000L)
+                    if (inIndex >= 0) {
+                        val inBuf: ByteBuffer? = decoder.getInputBuffer(inIndex)
+                        val sampleSize = if (inBuf != null) {
+                            try {
+                                vExtractor.readSampleData(inBuf, 0)
+                            } catch (_: Exception) {
+                                -1
+                            }
+                        } else {
+                            -1
+                        }
+
+                        if (sampleSize < 0) {
+                            // Check if extractor simply hit a broken sample header or actual end of stream
+                            val nextTimeUs = vExtractor.sampleTime
+                            if (nextTimeUs >= 0L && nextTimeUs < durationUs - 500_000L) {
+                                decoder.queueInputBuffer(inIndex, 0, 0, currentPositionUs, 0)
+                                vExtractor.advance()
+                            } else {
+                                decoder.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                inputDone = true
+                            }
+                        } else {
+                            val ptsUs = vExtractor.sampleTime.coerceAtLeast(0L)
+                            val flags = if ((vExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_KEY_FRAME) != 0) {
+                                MediaCodec.BUFFER_FLAG_KEY_FRAME
+                            } else {
+                                0
+                            }
+                            decoder.queueInputBuffer(inIndex, 0, sampleSize, ptsUs, flags)
+                            vExtractor.advance()
+                        }
+                    }
+                }
+
+                val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 10_000L)
+                if (outIndex >= 0) {
+                    if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        decoder.releaseOutputBuffer(outIndex, false)
+                        break
+                    }
+                    val ptsUs = bufferInfo.presentationTimeUs.coerceAtLeast(0L)
+                    currentPositionUs = ptsUs
+
+                    val elapsedWallUs = ((SystemClock.elapsedRealtime() - playbackStartWallMs) * 1000f * speedFactor).toLong()
+                    val expectedMediaUs = playbackStartMediaUs + elapsedWallUs
+                    val sleepUs = ptsUs - expectedMediaUs
+                    if (sleepUs > 2_000L) {
+                        val sleepMs = (sleepUs / 1000L).coerceAtMost(60L)
+                        Thread.sleep(sleepMs)
+                    } else if (sleepUs < -250_000L) {
+                        // Sync anchor after seek/stall
+                        playbackStartWallMs = SystemClock.elapsedRealtime()
+                        playbackStartMediaUs = ptsUs
+                    }
+
+                    decoder.releaseOutputBuffer(outIndex, bufferInfo.size > 0)
+                }
+            }
+
+            if (!isReleased) {
+                isPlayingState = false
+                mainHandler.post {
+                    if (!isReleased) onEnded()
+                }
+            }
+        } catch (t: Throwable) {
+            if (!isReleased && vThreadNotInterrupted(t)) {
+                isPlayingState = false
+                mainHandler.post {
+                    if (!isReleased) onError(t)
+                }
+            }
+        } finally {
+            safeReleaseCodecAndExtractor(aCodec, audioEx = aExtractor)
+            try {
+                aTrack?.stop()
+            } catch (_: Exception) {
+            }
+            try {
+                aTrack?.release()
+            } catch (_: Exception) {
+            }
+            safeReleaseCodecAndExtractor(vCodec, vExtractor)
+        }
+    }
+
+    private fun runAudioLoop(extractor: MediaExtractor, codec: MediaCodec, track: AudioTrack) {
+        val info = MediaCodec.BufferInfo()
+        var done = false
+        try {
+            while (!isReleased) {
+                if (isPausedByUser) {
+                    Thread.sleep(40L)
+                    continue
+                }
+                val seekTarget = pendingSeekUs
+                if (seekTarget >= 0L) {
+                    try {
+                        extractor.seekTo(seekTarget, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                        codec.flush()
+                        track.flush()
+                        track.play()
+                        done = false
+                    } catch (_: Exception) {
+                    }
+                }
+
+                if (!done) {
+                    val idx = codec.dequeueInputBuffer(10_000L)
+                    if (idx >= 0) {
+                        val buf = codec.getInputBuffer(idx)
+                        val size = if (buf != null) {
+                            try {
+                                extractor.readSampleData(buf, 0)
+                            } catch (_: Exception) {
+                                -1
+                            }
+                        } else {
+                            -1
+                        }
+                        if (size < 0) {
+                            val nextUs = extractor.sampleTime
+                            if (nextUs >= 0L && nextUs < durationUs - 500_000L) {
+                                codec.queueInputBuffer(idx, 0, 0, currentPositionUs, 0)
+                                extractor.advance()
+                            } else {
+                                codec.queueInputBuffer(idx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                done = true
+                            }
+                        } else {
+                            val pts = extractor.sampleTime.coerceAtLeast(0L)
+                            codec.queueInputBuffer(idx, 0, size, pts, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+
+                val outIdx = codec.dequeueOutputBuffer(info, 10_000L)
+                if (outIdx >= 0) {
+                    if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        codec.releaseOutputBuffer(outIdx, false)
+                        break
+                    }
+                    val outBuf = codec.getOutputBuffer(outIdx)
+                    if (outBuf != null && info.size > 0) {
+                        val pcm = ByteArray(info.size)
+                        outBuf.position(info.offset)
+                        outBuf.get(pcm, 0, info.size)
+                        track.write(pcm, 0, info.size)
+                    }
+                    codec.releaseOutputBuffer(outIdx, false)
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun vThreadNotInterrupted(t: Throwable): Boolean =
+        t !is InterruptedException && videoThread?.isInterrupted != true
+}
+
+/**
+ * Resolves exact byte length from ContentResolver when ContentDataSource returns C.LENGTH_UNSET (-1),
+ * preventing Mp4Extractor from passing regionLength = -1 at random points during playback/seeking.
  */
 @OptIn(UnstableApi::class)
 private class SafeGuardDataSource(
@@ -113,11 +561,13 @@ private class SafeGuardDataSource(
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
-        if (offset < 0 || offset >= buffer.size) {
-            return C.RESULT_END_OF_INPUT
+        if (length < 0) {
+            throw IOException("Invalid negative read length ($length) from extractor")
         }
-        val availableSpace = buffer.size - offset
-        val safeLength = if (length < 0) 1 else min(length, availableSpace)
+        if (offset < 0 || offset >= buffer.size) {
+            throw IOException("Invalid buffer offset ($offset) for buffer size ${buffer.size}")
+        }
+        val safeLength = min(length, buffer.size - offset)
         return upstream.read(buffer, offset, safeLength)
     }
 
@@ -767,6 +1217,9 @@ class MainActivity : Activity(), SensorEventListener {
     private var consecutiveErrorCount = 0
     private var lastErrorTimeMs = 0L
 
+    private var nativeEngine: NativeStagefrightEngine? = null
+    private var usingNativeEngine = false
+
     private lateinit var videoFrame: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var centerHud: TextView
@@ -839,13 +1292,55 @@ class MainActivity : Activity(), SensorEventListener {
         getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
 
+    private fun isCurrentlyPlaying(): Boolean =
+        if (usingNativeEngine) nativeEngine?.isPlaying() == true else player.isPlaying
+
+    private fun getActivePositionMs(): Long =
+        if (usingNativeEngine) (nativeEngine?.getCurrentPositionMs() ?: 0L)
+        else player.currentPosition.coerceAtLeast(0L)
+
+    private fun getActiveDurationMs(): Long {
+        val raw = if (usingNativeEngine) (nativeEngine?.getDurationMs() ?: 0L)
+        else player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+        if (raw > 0L) knownTotalDurationMs = raw
+        return if (raw > 0L) raw else knownTotalDurationMs
+    }
+
+    private fun syncPlayIcons(playing: Boolean) {
+        playButton.text = if (playing) "Ⅱ" else "▶"
+        if (::overlayPlayButton.isInitialized) {
+            overlayPlayButton.setImageDrawable(if (playing) pauseVector else playVector)
+        }
+        if (!playing && ::fpsBadge.isInitialized) {
+            fpsBadge.text = "-- FPS"
+        }
+    }
+
+    private fun togglePlayPause() {
+        if (usingNativeEngine) {
+            val ne = nativeEngine ?: return
+            if (ne.isPlaying()) {
+                ne.pause()
+                syncPlayIcons(false)
+            } else {
+                ne.play()
+                syncPlayIcons(true)
+            }
+            return
+        }
+        if (player.isPlaying) {
+            player.pause()
+        } else {
+            if (player.playbackState == Player.STATE_ENDED) performSafeSeek(0L)
+            player.play()
+        }
+    }
+
     private val progressUpdater = object : Runnable {
         override fun run() {
             if (::player.isInitialized) {
-                val rawDuration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
-                if (rawDuration > 0L) knownTotalDurationMs = rawDuration
-                val duration = if (rawDuration > 0L) rawDuration else knownTotalDurationMs
-                val position = player.currentPosition.coerceAtLeast(0L)
+                val duration = getActiveDurationMs()
+                val position = getActivePositionMs()
                 val progressPermille = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
                 if (!isScrubbing) {
                     seekBar.max = 1000
@@ -870,6 +1365,11 @@ class MainActivity : Activity(), SensorEventListener {
 
     private fun updateLiveFpsBadge() {
         if (!::fpsBadge.isInitialized || !showFpsEnabled) return
+        val playing = isCurrentlyPlaying()
+        if (!playing) {
+            fpsBadge.text = "-- FPS"
+            return
+        }
         val now = SystemClock.uptimeMillis()
         var liveFps = if (currentProjection != VrVideoSurfaceView.Projection.FLAT && ::vrSurfaceView.isInitialized) {
             vrSurfaceView.getMeasuredVideoFps()
@@ -877,35 +1377,36 @@ class MainActivity : Activity(), SensorEventListener {
             0
         }
 
-        val counters = player.videoDecoderCounters
-        if (counters != null) {
-            counters.ensureUpdated()
-            val totalRendered = counters.renderedOutputBufferCount
-            if (lastFpsCheckTimeMs > 0L) {
-                val elapsed = now - lastFpsCheckTimeMs
-                if (elapsed >= 500L) {
-                    val deltaFrames = (totalRendered - lastRenderedFrames).coerceAtLeast(0)
-                    val decoderFps = ((deltaFrames * 1000f) / elapsed + 0.5f).toInt()
-                    if (liveFps == 0 || currentProjection == VrVideoSurfaceView.Projection.FLAT) {
-                        liveFps = decoderFps
+        if (!usingNativeEngine) {
+            val counters = player.videoDecoderCounters
+            if (counters != null) {
+                counters.ensureUpdated()
+                val totalRendered = counters.renderedOutputBufferCount
+                if (lastFpsCheckTimeMs > 0L) {
+                    val elapsed = now - lastFpsCheckTimeMs
+                    if (elapsed >= 500L) {
+                        val deltaFrames = (totalRendered - lastRenderedFrames).coerceAtLeast(0)
+                        val decoderFps = ((deltaFrames * 1000f) / elapsed + 0.5f).toInt()
+                        if (liveFps == 0 || currentProjection == VrVideoSurfaceView.Projection.FLAT) {
+                            liveFps = decoderFps
+                        }
+                        lastRenderedFrames = totalRendered
+                        lastFpsCheckTimeMs = now
                     }
+                } else {
                     lastRenderedFrames = totalRendered
                     lastFpsCheckTimeMs = now
                 }
-            } else {
-                lastRenderedFrames = totalRendered
-                lastFpsCheckTimeMs = now
+            }
+            if (liveFps <= 0) {
+                val formatFps = player.videoFormat?.frameRate ?: -1f
+                if (formatFps > 0f) {
+                    liveFps = (formatFps + 0.5f).toInt()
+                }
             }
         }
 
-        if (liveFps <= 0 && player.isPlaying) {
-            val formatFps = player.videoFormat?.frameRate ?: -1f
-            if (formatFps > 0f) {
-                liveFps = (formatFps + 0.5f).toInt()
-            }
-        }
-
-        fpsBadge.text = if (player.isPlaying && liveFps > 0) "$liveFps FPS" else "-- FPS"
+        fpsBadge.text = if (liveFps > 0) "$liveFps FPS" else "-- FPS"
     }
 
     private fun applyFpsVisibility() {
@@ -993,12 +1494,8 @@ class MainActivity : Activity(), SensorEventListener {
 
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                playButton.text = if (isPlaying) "Ⅱ" else "▶"
-                if (::overlayPlayButton.isInitialized) {
-                    overlayPlayButton.setImageDrawable(if (isPlaying) pauseVector else playVector)
-                }
-                if (!isPlaying && ::fpsBadge.isInitialized) {
-                    fpsBadge.text = "-- FPS"
+                if (!usingNativeEngine) {
+                    syncPlayIcons(isPlaying)
                 }
             }
 
@@ -1011,12 +1508,8 @@ class MainActivity : Activity(), SensorEventListener {
                     titleView.text = resolvedName
                     if (::fullscreenTitleView.isInitialized) fullscreenTitleView.text = resolvedName
                 }
-                if (playbackState == Player.STATE_ENDED) {
-                    playButton.text = "▶"
-                    if (::overlayPlayButton.isInitialized) {
-                        overlayPlayButton.setImageDrawable(playVector)
-                    }
-                    if (::fpsBadge.isInitialized) fpsBadge.text = "-- FPS"
+                if (playbackState == Player.STATE_ENDED && !usingNativeEngine) {
+                    syncPlayIcons(false)
                 }
             }
 
@@ -1039,15 +1532,16 @@ class MainActivity : Activity(), SensorEventListener {
                 }
                 lastErrorTimeMs = now
 
-                // Zero-skip (+0ms) exact-position recovery
-                if (uri != null && consecutiveErrorCount < 4) {
+                val exactPos = if (lastRequestedSeekMs >= 0L) {
+                    lastRequestedSeekMs
+                } else {
+                    player.currentPosition.coerceAtLeast(0L)
+                }
+
+                // Switch to Android Native MediaExtractor + MediaCodec engine at exact position (0ms skip)
+                if (uri != null && consecutiveErrorCount < 2) {
                     consecutiveErrorCount++
-                    val exactPosition = if (lastRequestedSeekMs >= 0L) {
-                        lastRequestedSeekMs
-                    } else {
-                        player.currentPosition.coerceAtLeast(0L)
-                    }
-                    recoverStreamAt(exactPosition)
+                    switchToNativeEngine(uri, exactPos)
                     return
                 }
 
@@ -1060,23 +1554,52 @@ class MainActivity : Activity(), SensorEventListener {
         mainHandler.post(progressUpdater)
     }
 
-    private fun recoverStreamAt(targetPositionMs: Long) {
-        val uri = activePlaybackUri ?: return
-        val exactTarget = targetPositionMs.coerceAtLeast(0L)
-        lastRequestedSeekMs = exactTarget
-        mainHandler.postDelayed({
-            if (::player.isInitialized && activePlaybackUri == uri) {
-                rebindActiveSurface()
-                player.stop()
-                player.clearMediaItems()
-                player.setMediaItem(MediaItem.fromUri(uri))
-                player.prepare()
-                if (exactTarget > 0L) {
-                    player.seekTo(exactTarget)
+    private fun switchToNativeEngine(uri: Uri, startPositionMs: Long) {
+        val targetSurface = if (currentProjection == VrVideoSurfaceView.Projection.FLAT) {
+            playerView.videoSurfaceView?.let { v ->
+                when (v) {
+                    is SurfaceView -> v.holder.surface
+                    else -> null
                 }
-                player.playWhenReady = true
             }
-        }, 100L)
+        } else {
+            vrOutputSurface ?: vrSurfaceView.getVideoSurface()
+        }
+
+        try {
+            player.stop()
+            player.clearMediaItems()
+        } catch (_: Exception) {
+        }
+
+        nativeEngine?.release()
+        usingNativeEngine = true
+        val engine = NativeStagefrightEngine(
+            context = this,
+            onReady = { durMs ->
+                if (durMs > 0L) knownTotalDurationMs = durMs
+                placeholder.visibility = View.GONE
+                val resolvedName = currentVideoName.ifBlank { "Now playing" }
+                titleView.text = resolvedName
+                if (::fullscreenTitleView.isInitialized) fullscreenTitleView.text = resolvedName
+                syncPlayIcons(true)
+            },
+            onEnded = {
+                syncPlayIcons(false)
+            },
+            onError = { throwable ->
+                usingNativeEngine = false
+                val pbEx = PlaybackException(
+                    throwable.message ?: "Native MediaExtractor playback failed",
+                    throwable,
+                    PlaybackException.ERROR_CODE_IO_UNSPECIFIED
+                )
+                showFullErrorDialog(pbEx)
+            }
+        )
+        engine.setPlaybackSpeed(currentSpeed)
+        nativeEngine = engine
+        engine.start(uri, targetSurface, startPositionMs)
     }
 
     /**
@@ -1112,7 +1635,7 @@ class MainActivity : Activity(), SensorEventListener {
         val untruncatedTrace = buildCompleteStackTrace(error)
         val summary = buildString {
             appendLine("Error Code: ${error.errorCodeName} (${error.errorCode})")
-            appendLine("Timestamp: ${formatTime(player.currentPosition.coerceAtLeast(0L))}")
+            appendLine("Timestamp: ${formatTime(getActivePositionMs())}")
             appendLine("Message: ${error.message ?: "None"}")
             error.cause?.let { cause ->
                 appendLine("Root Cause: ${cause.javaClass.name}: ${cause.message}")
@@ -1185,9 +1708,27 @@ class MainActivity : Activity(), SensorEventListener {
         lastRequestedSeekMs = clamped
         consecutiveErrorCount = 0
 
+        if (usingNativeEngine) {
+            nativeEngine?.seekTo(clamped)
+            return
+        }
+
         val state = player.playbackState
         if (state == Player.STATE_IDLE || state == Player.STATE_ENDED || player.playerError != null) {
-            recoverStreamAt(clamped)
+            val uri = activePlaybackUri ?: return
+            mainHandler.postDelayed({
+                if (::player.isInitialized && activePlaybackUri == uri) {
+                    rebindActiveSurface()
+                    player.stop()
+                    player.clearMediaItems()
+                    player.setMediaItem(MediaItem.fromUri(uri))
+                    player.prepare()
+                    if (clamped > 0L) {
+                        player.seekTo(clamped)
+                    }
+                    player.playWhenReady = true
+                }
+            }, 100L)
         } else {
             player.seekTo(clamped)
             if (!player.isPlaying) {
@@ -1366,7 +1907,11 @@ class MainActivity : Activity(), SensorEventListener {
         popup.setOnMenuItemClickListener { item ->
             val selected = speedSteps.getOrNull(item.itemId) ?: return@setOnMenuItemClickListener false
             currentSpeed = selected
-            player.playbackParameters = PlaybackParameters(selected)
+            if (usingNativeEngine) {
+                nativeEngine?.setPlaybackSpeed(selected)
+            } else {
+                player.playbackParameters = PlaybackParameters(selected)
+            }
             val label = formatSpeedLabel(selected)
             speedButton.text = label
             if (::overlaySpeedButton.isInitialized) overlaySpeedButton.text = label
@@ -1393,11 +1938,11 @@ class MainActivity : Activity(), SensorEventListener {
         if (!isFullscreen) return
         val w = videoFrame.width.coerceAtLeast(1)
         if (x < w * 0.28f) {
-            performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L))
+            performSafeSeek((getActivePositionMs() - 10_000L).coerceAtLeast(0L))
             showCenterHud("-10s", 750L)
         } else if (x > w * 0.72f) {
-            val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-            performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
+            val end = getActiveDurationMs().takeIf { it > 0L } ?: Long.MAX_VALUE
+            performSafeSeek((getActivePositionMs() + 10_000L).coerceAtMost(end))
             showCenterHud("+10s", 750L)
         }
     }
@@ -1422,7 +1967,6 @@ class MainActivity : Activity(), SensorEventListener {
         }
         container.addView(dialogTitle)
 
-        // 1. Show Live FPS Toggle
         val fpsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1451,7 +1995,6 @@ class MainActivity : Activity(), SensorEventListener {
         fpsRow.addView(fpsSwitch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         container.addView(fpsRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        // 2. Show View Mode Badge Toggle
         val modeBadgeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1485,7 +2028,6 @@ class MainActivity : Activity(), SensorEventListener {
             }
         )
 
-        // 3. Free-Range 1ms Precision Audio Sync Offset (-1000ms to +1000ms)
         val audioCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(12))
@@ -1524,9 +2066,7 @@ class MainActivity : Activity(), SensorEventListener {
                 }
                 override fun onStartTrackingTouch(bar: SeekBar?) {}
                 override fun onStopTrackingTouch(bar: SeekBar?) {
-                    if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
-                        performSafeSeek(player.currentPosition)
-                    }
+                    performSafeSeek(getActivePositionMs())
                 }
             })
         }
@@ -1538,9 +2078,7 @@ class MainActivity : Activity(), SensorEventListener {
             audioSeekBar.progress = clamped + 1000
             audioValueText.text = formatOffsetLabel(clamped)
             prefs.edit().putInt(KEY_AUDIO_OFFSET_MS, clamped).apply()
-            if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
-                performSafeSeek(player.currentPosition)
-            }
+            performSafeSeek(getActivePositionMs())
         }
 
         fun stepChip(label: String, deltaMs: Int): TextView = text(label, 10f, Color.WHITE, true).apply {
@@ -2123,7 +2661,7 @@ class MainActivity : Activity(), SensorEventListener {
             isClickable = true
             isFocusable = true
             contentDescription = "Rewind 10 seconds"
-            setOnClickListener { performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
+            setOnClickListener { performSafeSeek((getActivePositionMs() - 10_000L).coerceAtLeast(0L)) }
         }
         overlayPlayButton = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_XY
@@ -2135,12 +2673,7 @@ class MainActivity : Activity(), SensorEventListener {
             isClickable = true
             isFocusable = true
             contentDescription = "Play or pause"
-            setOnClickListener {
-                if (player.isPlaying) player.pause() else {
-                    if (player.playbackState == Player.STATE_ENDED) performSafeSeek(0L)
-                    player.play()
-                }
-            }
+            setOnClickListener { togglePlayPause() }
         }
         val centerForward = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_XY
@@ -2149,8 +2682,8 @@ class MainActivity : Activity(), SensorEventListener {
             isFocusable = true
             contentDescription = "Forward 10 seconds"
             setOnClickListener {
-                val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-                performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
+                val end = getActiveDurationMs().takeIf { it > 0L } ?: Long.MAX_VALUE
+                performSafeSeek((getActivePositionMs() + 10_000L).coerceAtMost(end))
             }
         }
         fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(26), dp(22)).apply {
@@ -2184,13 +2717,13 @@ class MainActivity : Activity(), SensorEventListener {
                 isScrubbing = true
             }
             onProgressScrub = { value ->
-                val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
+                val d = getActiveDurationMs()
                 val previewMs = (value.toLong() * d) / 1000L
                 fullscreenCurrentTime.text = formatTime(previewMs)
                 showCenterHud(formatTime(previewMs))
             }
             onStopScrub = { value ->
-                val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
+                val d = getActiveDurationMs()
                 if (d > 0L) {
                     performSafeSeek((value.toLong() * d) / 1000L)
                 }
@@ -2368,7 +2901,7 @@ class MainActivity : Activity(), SensorEventListener {
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onStartTrackingTouch(seekBar: SeekBar?) { isScrubbing = true }
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
+                    val duration = getActiveDurationMs()
                     if (duration > 0L) {
                         performSafeSeek((this@MainActivity.seekBar.progress / 1000f * duration).toLong())
                     }
@@ -2376,7 +2909,7 @@ class MainActivity : Activity(), SensorEventListener {
                 }
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (fromUser) {
-                        val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
+                        val duration = getActiveDurationMs()
                         currentTimeView.text = formatTime((duration * progress) / 1000L)
                     }
                 }
@@ -2401,21 +2934,16 @@ class MainActivity : Activity(), SensorEventListener {
             setOnClickListener { showSpeedPicker(this) }
         }
         val backButton = transportButton("-10s").apply {
-            setOnClickListener { performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
+            setOnClickListener { performSafeSeek((getActivePositionMs() - 10_000L).coerceAtLeast(0L)) }
         }
         playButton = transportButton("▶", true).apply {
             textSize = 20f
-            setOnClickListener {
-                if (player.isPlaying) player.pause() else {
-                    if (player.playbackState == Player.STATE_ENDED) performSafeSeek(0L)
-                    player.play()
-                }
-            }
+            setOnClickListener { togglePlayPause() }
         }
         val forwardButton = transportButton("+10s").apply {
             setOnClickListener {
-                val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-                performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
+                val end = getActiveDurationMs().takeIf { it > 0L } ?: Long.MAX_VALUE
+                performSafeSeek((getActivePositionMs() + 10_000L).coerceAtMost(end))
             }
         }
 
@@ -2502,14 +3030,18 @@ class MainActivity : Activity(), SensorEventListener {
         if (projection == VrVideoSurfaceView.Projection.FLAT) {
             vrSurfaceView.visibility = View.GONE
             playerView.visibility = View.VISIBLE
-            playerView.player = player
+            if (!usingNativeEngine) {
+                playerView.player = player
+            }
         } else {
             playerView.player = null
             playerView.visibility = View.GONE
             vrSurfaceView.visibility = View.VISIBLE
-            val activeSurface = vrOutputSurface ?: vrSurfaceView.getVideoSurface()
-            if (activeSurface != null && activeSurface.isValid) {
-                player.setVideoSurface(activeSurface)
+            if (!usingNativeEngine) {
+                val activeSurface = vrOutputSurface ?: vrSurfaceView.getVideoSurface()
+                if (activeSurface != null && activeSurface.isValid) {
+                    player.setVideoSurface(activeSurface)
+                }
             }
         }
         updateBadgeText()
@@ -2591,6 +3123,9 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     private fun startPlayback(uri: Uri) {
+        nativeEngine?.release()
+        nativeEngine = null
+        usingNativeEngine = false
         activePlaybackUri = uri
         knownTotalDurationMs = 0L
         lastRequestedSeekMs = -1L
@@ -2655,7 +3190,7 @@ class MainActivity : Activity(), SensorEventListener {
             rootLayout.clipChildren = false
             window.setBackgroundDrawableResource(android.R.color.black)
             overlayRotateButton.text = "Landscape"
-            overlayPlayButton.setImageDrawable(if (player.isPlaying) pauseVector else playVector)
+            overlayPlayButton.setImageDrawable(if (isCurrentlyPlaying()) pauseVector else playVector)
             (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
             (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
             enterImmersiveMode()
@@ -2775,8 +3310,13 @@ class MainActivity : Activity(), SensorEventListener {
 
     override fun onPause() {
         sensorManager.unregisterListener(this)
+        if (usingNativeEngine) {
+            nativeEngine?.pause()
+            syncPlayIcons(false)
+        } else {
+            if (::player.isInitialized) player.pause()
+        }
         if (::vrSurfaceView.isInitialized) vrSurfaceView.onPause()
-        if (::player.isInitialized) player.pause()
         super.onPause()
     }
 
@@ -2784,6 +3324,8 @@ class MainActivity : Activity(), SensorEventListener {
         sensorManager.unregisterListener(this)
         mainHandler.removeCallbacks(progressUpdater)
         mainHandler.removeCallbacks(hideCenterHudRunnable)
+        nativeEngine?.release()
+        nativeEngine = null
         if (::playerView.isInitialized) playerView.player = null
         if (::vrSurfaceView.isInitialized) vrSurfaceView.release()
         if (::player.isInitialized) player.release()
