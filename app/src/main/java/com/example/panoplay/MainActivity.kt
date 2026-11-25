@@ -27,11 +27,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
-import android.system.Os
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -58,10 +56,8 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.BaseDataSource
-import androidx.media3.datasource.DataSource
-import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
@@ -71,128 +67,13 @@ import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
-import java.io.IOException
 import java.util.ArrayList
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
 
 /**
- * Uses Linux Os.pread() stateless positional reads over a duplicated ParcelFileDescriptor.
- * Because Os.pread() never mutates the kernel file offset, FUSE MediaProvider streams never suffer
- * from concurrent seek/read corruption (EBADF / EINVAL / ERROR_CODE_IO_UNSPECIFIED) on large MP4s.
- */
-@OptIn(UnstableApi::class)
-private class PreadContentDataSource(private val context: Context) : BaseDataSource(/* isNetwork= */ false) {
-    private val fallback = DefaultDataSource.Factory(context).createDataSource()
-    private var usingFallback = false
-    private var uri: Uri? = null
-    private var pfd: ParcelFileDescriptor? = null
-    private var currentOffset: Long = 0L
-    private var bytesRemaining: Long = C.LENGTH_UNSET.toLong()
-    private var opened = false
-
-    override fun open(dataSpec: DataSpec): Long {
-        uri = dataSpec.uri
-        if (dataSpec.uri.scheme != "content") {
-            usingFallback = true
-            return fallback.open(dataSpec)
-        }
-        usingFallback = false
-        transferInitializing(dataSpec)
-        try {
-            val rawPfd = context.contentResolver.openFileDescriptor(dataSpec.uri, "r")
-                ?: throw IOException("Cannot open file descriptor")
-            val duplicated = rawPfd.dup()
-            try {
-                rawPfd.close()
-            } catch (_: IOException) {
-            }
-            pfd = duplicated
-            currentOffset = dataSpec.position
-
-            // Verify Os.pread works on this descriptor (pipes/sockets throw ESPIPE and fall back cleanly)
-            val probe = ByteArray(1)
-            val probeRead = Os.pread(duplicated.fileDescriptor, probe, 0, 1, currentOffset)
-            if (probeRead < 0) {
-                throw IOException("Probe pread failed")
-            }
-
-            val statSize = duplicated.statSize
-            bytesRemaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
-                dataSpec.length
-            } else if (statSize > 0L) {
-                (statSize - dataSpec.position).coerceAtLeast(0L)
-            } else {
-                C.LENGTH_UNSET.toLong()
-            }
-            opened = true
-            transferStarted(dataSpec)
-            return bytesRemaining
-        } catch (_: Throwable) {
-            close()
-            usingFallback = true
-            return fallback.open(dataSpec)
-        }
-    }
-
-    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-        if (usingFallback) return fallback.read(buffer, offset, length)
-        if (length == 0) return 0
-        if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
-
-        val descriptor = pfd?.fileDescriptor ?: return C.RESULT_END_OF_INPUT
-        val toRead = if (bytesRemaining == C.LENGTH_UNSET.toLong()) {
-            length
-        } else {
-            min(bytesRemaining, length.toLong()).toInt()
-        }
-
-        return try {
-            val readCount = Os.pread(descriptor, buffer, offset, toRead, currentOffset)
-            if (readCount <= 0) {
-                C.RESULT_END_OF_INPUT
-            } else {
-                currentOffset += readCount.toLong()
-                if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
-                    bytesRemaining -= readCount.toLong()
-                }
-                bytesTransferred(readCount)
-                readCount
-            }
-        } catch (e: Exception) {
-            throw IOException("pread failed at offset $currentOffset", e)
-        }
-    }
-
-    override fun getUri(): Uri? = if (usingFallback) fallback.uri else uri
-
-    override fun close() {
-        uri = null
-        if (usingFallback) {
-            usingFallback = false
-            fallback.close()
-            return
-        }
-        try {
-            pfd?.close()
-        } catch (_: IOException) {
-        } finally {
-            pfd = null
-        }
-        if (opened) {
-            opened = false
-            transferEnded()
-        }
-    }
-
-    class Factory(private val context: Context) : DataSource.Factory {
-        override fun createDataSource(): DataSource = PreadContentDataSource(context)
-    }
-}
-
-/**
- * Exact Material vector icons matching reference screenshot (1000063554.jpg)
+ * Exact Material vector icons matching reference screenshot
  * for Speedometer, Recenter Crosshair, and Motion Compass pills.
  */
 private class PillIconDrawable(
@@ -1008,12 +889,22 @@ class MainActivity : Activity(), SensorEventListener {
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        // Stateless Os.pread() DataSource prevents MediaProvider file-offset corruption during playback & seeks
-        val dataSourceFactory = PreadContentDataSource.Factory(this)
+        // Official Media3 DefaultDataSource + tuned LoadControl (prevents native crashes and buffer starvation on long MP4s)
+        val dataSourceFactory = DefaultDataSource.Factory(this)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 15_000,
+                /* maxBufferMs = */ 50_000,
+                /* bufferForPlaybackMs = */ 1_500,
+                /* bufferForPlaybackAfterRebufferMs = */ 3_000
+            )
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
 
         player = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, true)
             .build()
 
@@ -1062,7 +953,7 @@ class MainActivity : Activity(), SensorEventListener {
             override fun onPlayerError(error: PlaybackException) {
                 val uri = activePlaybackUri
                 val now = SystemClock.uptimeMillis()
-                if (now - lastErrorTimeMs > 4000L) {
+                if (now - lastErrorTimeMs > 5000L) {
                     consecutiveErrorCount = 0
                 }
                 lastErrorTimeMs = now
@@ -1086,7 +977,7 @@ class MainActivity : Activity(), SensorEventListener {
                             }
                             player.playWhenReady = true
                         }
-                    }, 80L)
+                    }, 120L)
                     return
                 }
 
