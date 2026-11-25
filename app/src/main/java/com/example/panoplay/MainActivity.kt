@@ -93,7 +93,6 @@ private class VolumeVectorDrawable(
         if (w <= 0f || h <= 0f) return
 
         val cy = h * 0.5f
-        // Speaker cone body (Google Files style minimal rounded silhouette)
         speakerPath.reset()
         speakerPath.moveTo(w * 0.14f, cy - h * 0.15f)
         speakerPath.lineTo(w * 0.30f, cy - h * 0.15f)
@@ -105,7 +104,6 @@ private class VolumeVectorDrawable(
         canvas.drawPath(speakerPath, fillPaint)
 
         if (levelPercent <= 0) {
-            // Clean diagonal mute cross on right side
             val x1 = w * 0.60f
             val x2 = w * 0.84f
             val y1 = cy - h * 0.14f
@@ -113,12 +111,10 @@ private class VolumeVectorDrawable(
             canvas.drawLine(x1, y1, x2, y2, strokePaint)
             canvas.drawLine(x2, y1, x1, y2, strokePaint)
         } else {
-            // Inner sound wave arc
             val r1 = w * 0.16f
             waveRect.set(w * 0.46f - r1, cy - r1, w * 0.46f + r1, cy + r1)
             canvas.drawArc(waveRect, -42f, 84f, false, strokePaint)
 
-            // Outer sound wave arc for > 45% volume
             if (levelPercent > 45) {
                 val r2 = w * 0.31f
                 waveRect.set(w * 0.46f - r2, cy - r2, w * 0.46f + r2, cy + r2)
@@ -163,7 +159,7 @@ private class CinemaSeekBar(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
 
     private val trackBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(72, 255, 255, 255)
+        color = Color.argb(85, 255, 255, 255)
         style = Paint.Style.FILL
     }
     private val trackFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -171,7 +167,7 @@ private class CinemaSeekBar(context: Context) : View(context) {
         style = Paint.Style.FILL
     }
     private val thumbGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(75, 255, 79, 94)
+        color = Color.argb(80, 255, 79, 94)
         style = Paint.Style.FILL
     }
     private val thumbCorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -191,7 +187,7 @@ private class CinemaSeekBar(context: Context) : View(context) {
         val usableWidth = (w - sidePad * 2f).coerceAtLeast(1f)
         val centerY = h * 0.5f
 
-        val trackHeight = (if (isDragging) 6f else 3.2f) * density
+        val trackHeight = (if (isDragging) 6f else 3.5f) * density
         val halfTrack = trackHeight * 0.5f
         val radius = halfTrack
 
@@ -205,9 +201,9 @@ private class CinemaSeekBar(context: Context) : View(context) {
         canvas.drawRoundRect(fillRect, radius, radius, trackFillPaint)
 
         if (isDragging) {
-            canvas.drawCircle(thumbX, centerY, 13f * density, thumbGlowPaint)
+            canvas.drawCircle(thumbX, centerY, 14f * density, thumbGlowPaint)
         }
-        val thumbRadius = (if (isDragging) 7.5f else 5.5f) * density
+        val thumbRadius = (if (isDragging) 8.5f else 6.5f) * density
         canvas.drawCircle(thumbX, centerY, thumbRadius, thumbCorePaint)
     }
 
@@ -331,7 +327,6 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
                         startLevel = onBrightnessSwipeStart?.invoke() ?: 0.5f
                         cancelChildTouch(event)
                     } else if (startX > width * 0.90f) {
-                        // Right 10% edge vertical swipe controls volume without interfering with VR drag
                         activeGesture = GestureMode.VOLUME
                         startLevel = onVolumeSwipeStart?.invoke() ?: 0.5f
                         cancelChildTouch(event)
@@ -464,9 +459,13 @@ class MainActivity : Activity() {
     private lateinit var currentTimeView: TextView
     private lateinit var durationView: TextView
     private lateinit var fullscreenButton: TextView
+
+    // Redesigned Fullscreen Controls (Top bar + Center transport + Bottom slider & pills)
+    private lateinit var fullscreenTopBar: LinearLayout
+    private lateinit var fullscreenCenterControls: LinearLayout
+    private lateinit var fullscreenBottomControls: LinearLayout
     private lateinit var overlayPlayButton: TextView
     private lateinit var overlaySeekBar: CinemaSeekBar
-    private lateinit var fullscreenControls: LinearLayout
     private lateinit var fullscreenTitleView: TextView
     private lateinit var fullscreenCurrentTime: TextView
     private lateinit var fullscreenDuration: TextView
@@ -822,6 +821,9 @@ class MainActivity : Activity() {
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         } else {
             ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+        if (::overlayRotateButton.isInitialized) {
+            overlayRotateButton.text = if (isFullscreenLandscape) "↻  Portrait" else "↻  Landscape"
         }
         val modeText = if (isFullscreenLandscape) "↻  LANDSCAPE" else "↻  PORTRAIT"
         showCenterHud(modeText, 850L)
@@ -1461,7 +1463,7 @@ class MainActivity : Activity() {
             setPadding(dp(18), dp(10), dp(18), dp(10))
             background = rounded(Color.argb(115, 15, 17, 22), 24)
             alpha = 0.88f
-            elevation = dp(4).toFloat()
+            elevation = dp(8).toFloat()
             visibility = View.GONE
         }
         videoFrame.addView(
@@ -1517,41 +1519,104 @@ class MainActivity : Activity() {
         }
         videoFrame.addView(fullscreenButton, fullscreenParams)
 
-        // Translucent Frosted-Glass Cinema Fullscreen Controls Dock
-        fullscreenControls = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-            background = GradientDrawable().apply {
-                setColor(Color.argb(105, 12, 14, 19))
-                cornerRadius = dp(20).toFloat()
-                setStroke(dp(1), Color.argb(35, 255, 255, 255))
-            }
-            elevation = dp(4).toFloat()
-        }
-
-        val dockTopRow = LinearLayout(this).apply {
+        // 1. Fullscreen Top Bar (Back arrow + Video Title)
+        fullscreenTopBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(2), 0, dp(2), dp(4))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(Color.argb(175, 8, 10, 14), Color.TRANSPARENT)
+            )
+            elevation = dp(4).toFloat()
+            visibility = View.GONE
         }
-        fullscreenTitleView = text("Now playing", 11.5f, Color.rgb(235, 239, 246), true).apply {
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
-        val exitFullscreenBtn = text("✕", 13f, Color.WHITE, true).apply {
+        val exitFullscreenBtn = text("←", 20f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            background = rounded(Color.argb(95, 42, 46, 56), 14)
             isClickable = true
             isFocusable = true
             contentDescription = "Exit full screen"
             setOnClickListener { if (isFullscreen) toggleFullscreen() }
         }
-        dockTopRow.addView(fullscreenTitleView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+        fullscreenTitleView = text("Now playing", 14f, Color.WHITE, true).apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        fullscreenTopBar.addView(exitFullscreenBtn, LinearLayout.LayoutParams(dp(38), dp(36)).apply {
             rightMargin = dp(8)
         })
-        dockTopRow.addView(exitFullscreenBtn, LinearLayout.LayoutParams(dp(28), dp(26)))
-        fullscreenControls.addView(dockTopRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        fullscreenTopBar.addView(fullscreenTitleView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        videoFrame.addView(
+            fullscreenTopBar,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP)
+        )
+
+        // 2. Fullscreen Center Transport Row (Rewind ◀◀  |  Large Circular Play/Pause  |  Forward ▶▶)
+        fullscreenCenterControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            elevation = dp(6).toFloat()
+            visibility = View.GONE
+        }
+        val centerRewind = text("◀◀", 18f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            background = rounded(Color.argb(105, 15, 17, 22), 26)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Rewind 10 seconds"
+            setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
+        }
+        overlayPlayButton = text("▶", 24f, Color.rgb(14, 16, 22), true).apply {
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.rgb(122, 146, 255))
+            }
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Play or pause"
+            setOnClickListener {
+                if (player.isPlaying) player.pause() else {
+                    if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
+                    player.play()
+                }
+            }
+        }
+        val centerForward = text("▶▶", 18f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            background = rounded(Color.argb(105, 15, 17, 22), 26)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Forward 10 seconds"
+            setOnClickListener {
+                val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
+                player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
+            }
+        }
+        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(52), dp(52)).apply {
+            rightMargin = dp(26)
+        })
+        fullscreenCenterControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(68), dp(68)))
+        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(52), dp(52)).apply {
+            leftMargin = dp(26)
+        })
+        videoFrame.addView(
+            fullscreenCenterControls,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+        )
+
+        // 3. Fullscreen Bottom Dock (Slider row on top, Speed & Landscape pills below slider)
+        fullscreenBottomControls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(16), dp(14), dp(16), dp(18))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.BOTTOM_TOP,
+                intArrayOf(Color.argb(190, 8, 10, 14), Color.TRANSPARENT)
+            )
+            elevation = dp(4).toFloat()
+            visibility = View.GONE
+        }
 
         overlaySeekBar = CinemaSeekBar(this).apply {
             max = 1000
@@ -1579,86 +1644,56 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        fullscreenCurrentTime = text("00:00", 10.5f, Color.WHITE, true).apply {
+        fullscreenCurrentTime = text("00:00", 11.5f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER_VERTICAL or Gravity.START
             includeFontPadding = false
         }
-        fullscreenDuration = text("00:00", 10.5f, Color.rgb(195, 200, 212), true).apply {
+        fullscreenDuration = text("00:00", 11.5f, Color.rgb(210, 214, 224), true).apply {
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
             includeFontPadding = false
         }
-        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(dp(44), dp(34)))
+        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(dp(46), dp(34)))
         fullscreenSeekRow.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(34), 1f))
-        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(dp(44), dp(34)))
-        fullscreenControls.addView(
+        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(dp(46), dp(34)))
+        fullscreenBottomControls.addView(
             fullscreenSeekRow,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
-        val rewind = transportButton("↶ 10").apply {
-            setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
-        }
-        overlayPlayButton = transportButton("▶", true).apply {
-            setOnClickListener {
-                if (player.isPlaying) player.pause() else {
-                    if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
-                    player.play()
-                }
-            }
-        }
-        val forward = transportButton("10 ↷").apply {
-            setOnClickListener {
-                val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-                player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
-            }
-        }
-        overlaySpeedButton = transportButton("1.0x").apply {
-            setOnClickListener { showSpeedPicker(this) }
-        }
-        overlayRotateButton = transportButton("↻").apply {
-            setOnClickListener { toggleFullscreenOrientation() }
-        }
-
-        val fullscreenTransport = LinearLayout(this).apply {
+        // Bottom pills row below slider: Speed & Landscape
+        val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(4), 0, 0)
+            setPadding(0, dp(10), 0, 0)
         }
-        listOf(overlaySpeedButton, rewind, overlayPlayButton, forward, overlayRotateButton).forEachIndexed { index, control ->
-            val isPlay = index == 2
-            control.background = rounded(
-                if (isPlay) Color.argb(215, 255, 79, 94) else Color.argb(115, 32, 36, 46),
-                if (isPlay) 22 else 14
-            )
-            control.textSize = when (index) {
-                2 -> 18f
-                4 -> 15f
-                else -> 11f
-            }
-            val btnWidth = when (index) {
-                2 -> 54
-                0 -> 48
-                4 -> 42
-                else -> 52
-            }
-            val btnHeight = if (isPlay) 40 else 36
-            fullscreenTransport.addView(
-                control,
-                LinearLayout.LayoutParams(dp(btnWidth), dp(btnHeight)).apply {
-                    if (index != 0) leftMargin = dp(8)
-                }
-            )
+        overlaySpeedButton = text("⚡  1.0x", 12f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(9), dp(18), dp(9))
+            background = rounded(Color.argb(145, 28, 32, 42), 22)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showSpeedPicker(this) }
         }
-        fullscreenControls.addView(
-            fullscreenTransport,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        overlayRotateButton = text("↻  Landscape", 12f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(9), dp(18), dp(9))
+            background = rounded(Color.argb(145, 28, 32, 42), 22)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { toggleFullscreenOrientation() }
+        }
+        bottomPillsRow.addView(overlaySpeedButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            rightMargin = dp(12)
+        })
+        bottomPillsRow.addView(overlayRotateButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        fullscreenBottomControls.addView(
+            bottomPillsRow,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         )
-        fullscreenControls.visibility = View.GONE
+
         videoFrame.addView(
-            fullscreenControls,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
-                setMargins(dp(14), 0, dp(14), dp(14))
-            }
+            fullscreenBottomControls,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
         )
 
         placeholder = LinearLayout(this).apply {
@@ -2009,7 +2044,6 @@ class MainActivity : Activity() {
         isFullscreen = !isFullscreen
         fullscreenControlsVisible = true
         fullscreenChrome.forEach { it.visibility = if (isFullscreen) View.GONE else View.VISIBLE }
-        fullscreenControls.visibility = if (isFullscreen) View.VISIBLE else View.GONE
         fullscreenButton.visibility = if (isFullscreen) View.GONE else View.VISIBLE
         val params = videoFrame.layoutParams as LinearLayout.LayoutParams
         if (isFullscreen) {
@@ -2026,6 +2060,10 @@ class MainActivity : Activity() {
             rootLayout.clipToPadding = false
             rootLayout.clipChildren = false
             window.setBackgroundDrawableResource(android.R.color.black)
+            overlayRotateButton.text = "↻  Landscape"
+            // Shift top badges slightly below fullscreenTopBar
+            (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
+            (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
             enterImmersiveMode()
         } else {
             if (isFullscreenLandscape) {
@@ -2040,6 +2078,8 @@ class MainActivity : Activity() {
                 normalRootPadding[0], normalRootPadding[1],
                 normalRootPadding[2], normalRootPadding[3]
             )
+            (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(12)
+            (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(12)
             fullscreenButton.contentDescription = "Enter full screen"
             exitImmersiveMode()
         }
@@ -2050,7 +2090,7 @@ class MainActivity : Activity() {
                 shouldIgnoreTap = { x, y ->
                     fun inside(view: View): Boolean = view.visibility == View.VISIBLE &&
                         x >= view.left && x <= view.right && y >= view.top && y <= view.bottom
-                    inside(fullscreenControls)
+                    inside(fullscreenTopBar) || inside(fullscreenCenterControls) || inside(fullscreenBottomControls)
                 }
             }
             setFullscreenControlsVisible(true)
@@ -2060,7 +2100,9 @@ class MainActivity : Activity() {
                 shouldIgnoreTap = null
             }
             fullscreenControlsVisible = false
-            fullscreenControls.visibility = View.GONE
+            fullscreenTopBar.visibility = View.GONE
+            fullscreenCenterControls.visibility = View.GONE
+            fullscreenBottomControls.visibility = View.GONE
             fullscreenButton.visibility = View.VISIBLE
             applyModeBadgeVisibility()
             applyFpsVisibility()
@@ -2070,7 +2112,9 @@ class MainActivity : Activity() {
     private fun setFullscreenControlsVisible(visible: Boolean) {
         fullscreenControlsVisible = visible
         val visibility = if (visible) View.VISIBLE else View.GONE
-        fullscreenControls.visibility = visibility
+        fullscreenTopBar.visibility = visibility
+        fullscreenCenterControls.visibility = visibility
+        fullscreenBottomControls.visibility = visibility
         if (showModeBadgeEnabled) {
             modeBadge.visibility = visibility
         } else {
