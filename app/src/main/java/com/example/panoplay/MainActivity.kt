@@ -32,7 +32,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
-import android.util.Log
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -67,41 +66,59 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
-import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import java.io.IOException
 import java.util.ArrayList
+import java.util.IdentityHashMap
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
 
 /**
- * Guards DefaultDataSource against negative/invalid read lengths (e.g. regionLength=-1 from
- * corrupted MP4 sample tables) before they hit FileInputStream / IoBridge.read().
+ * Resolves exact byte length from ContentResolver when ContentDataSource returns C.LENGTH_UNSET (-1),
+ * preventing Mp4Extractor from passing regionLength = -1 at random points during playback/seeking.
  */
 @OptIn(UnstableApi::class)
-private class SafeGuardDataSource(private val upstream: DataSource) : DataSource {
+private class SafeGuardDataSource(
+    private val context: Context,
+    private val upstream: DataSource
+) : DataSource {
+
     override fun addTransferListener(transferListener: TransferListener) {
         upstream.addTransferListener(transferListener)
     }
 
     override fun open(dataSpec: DataSpec): Long {
-        return upstream.open(dataSpec)
+        val reportedLength = upstream.open(dataSpec)
+        if (reportedLength != C.LENGTH_UNSET.toLong()) {
+            return reportedLength
+        }
+        val totalSize = queryExactFileSize(dataSpec.uri)
+        if (totalSize > 0L) {
+            val remaining = (totalSize - dataSpec.position).coerceAtLeast(0L)
+            return if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
+                min(remaining, dataSpec.length)
+            } else {
+                remaining
+            }
+        }
+        return C.LENGTH_UNSET.toLong()
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
-        if (length < 0 || offset < 0 || offset > buffer.size) {
-            return C.RESULT_END_OF_INPUT
+        if (length < 0) {
+            throw IOException("Invalid negative read length ($length) from extractor")
+        }
+        if (offset < 0 || offset >= buffer.size) {
+            throw IOException("Invalid buffer offset ($offset) for buffer size ${buffer.size}")
         }
         val safeLength = min(length, buffer.size - offset)
-        if (safeLength <= 0) {
-            return C.RESULT_END_OF_INPUT
-        }
         return upstream.read(buffer, offset, safeLength)
     }
 
@@ -111,9 +128,27 @@ private class SafeGuardDataSource(private val upstream: DataSource) : DataSource
         upstream.close()
     }
 
-    class Factory(context: Context) : DataSource.Factory {
+    private fun queryExactFileSize(uri: Uri): Long {
+        if (uri.scheme != "content") return -1L
+        var cursor: Cursor? = null
+        return try {
+            cursor = context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)
+            if (cursor != null && cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (idx >= 0 && !cursor.isNull(idx)) cursor.getLong(idx) else -1L
+            } else {
+                -1L
+            }
+        } catch (_: Exception) {
+            -1L
+        } finally {
+            cursor?.close()
+        }
+    }
+
+    class Factory(private val context: Context) : DataSource.Factory {
         private val baseFactory = DefaultDataSource.Factory(context)
-        override fun createDataSource(): DataSource = SafeGuardDataSource(baseFactory.createDataSource())
+        override fun createDataSource(): DataSource = SafeGuardDataSource(context, baseFactory.createDataSource())
     }
 }
 
@@ -730,8 +765,6 @@ class MainActivity : Activity(), SensorEventListener {
     private var activePlaybackUri: Uri? = null
     private var knownTotalDurationMs: Long = 0L
     private var lastRequestedSeekMs: Long = -1L
-    private var lastKnownGoodPosMs: Long = 0L
-    private var bufferingStartMs: Long = 0L
     private var consecutiveErrorCount = 0
     private var lastErrorTimeMs = 0L
 
@@ -813,28 +846,7 @@ class MainActivity : Activity(), SensorEventListener {
                 val rawDuration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
                 if (rawDuration > 0L) knownTotalDurationMs = rawDuration
                 val duration = if (rawDuration > 0L) rawDuration else knownTotalDurationMs
-
                 val position = player.currentPosition.coerceAtLeast(0L)
-                if (player.playbackState == Player.STATE_READY && position > 0L) {
-                    lastKnownGoodPosMs = position
-                    bufferingStartMs = 0L
-                }
-
-                // Stall watchdog: if buffering hangs > 3s on a damaged GOP, jump ahead to next clean keyframe
-                if (player.playbackState == Player.STATE_BUFFERING && player.playWhenReady && activePlaybackUri != null) {
-                    val now = SystemClock.uptimeMillis()
-                    if (bufferingStartMs == 0L) {
-                        bufferingStartMs = now
-                    } else if (now - bufferingStartMs > 3000L) {
-                        bufferingStartMs = now
-                        val anchor = if (lastRequestedSeekMs >= 0L) lastRequestedSeekMs else lastKnownGoodPosMs
-                        val nextKeyframePos = (anchor + 4_000L).coerceAtMost((duration - 1_000L).coerceAtLeast(0L))
-                        recoverStreamAt(nextKeyframePos)
-                    }
-                } else {
-                    bufferingStartMs = 0L
-                }
-
                 val progressPermille = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
                 if (!isScrubbing) {
                     seekBar.max = 1000
@@ -977,7 +989,6 @@ class MainActivity : Activity(), SensorEventListener {
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, true)
             .build()
-        player.setSeekParameters(SeekParameters.NEXT_SYNC)
 
         buildInterface()
 
@@ -996,26 +1007,12 @@ class MainActivity : Activity(), SensorEventListener {
                 if (playbackState == Player.STATE_READY) {
                     consecutiveErrorCount = 0
                     lastRequestedSeekMs = -1L
-                    bufferingStartMs = 0L
                     placeholder.visibility = View.GONE
                     val resolvedName = currentVideoName.ifBlank { "Now playing" }
                     titleView.text = resolvedName
                     if (::fullscreenTitleView.isInitialized) fullscreenTitleView.text = resolvedName
                 }
                 if (playbackState == Player.STATE_ENDED) {
-                    val currentPos = player.currentPosition.coerceAtLeast(0L)
-                    // If SafeGuardDataSource hit a corrupted MP4 sample (-1) well before actual video end,
-                    // jump +4s past the damaged GOP cluster instead of freezing at STATE_ENDED.
-                    if (activePlaybackUri != null &&
-                        knownTotalDurationMs > 15_000L &&
-                        currentPos < knownTotalDurationMs - 8_000L &&
-                        consecutiveErrorCount < 5
-                    ) {
-                        consecutiveErrorCount++
-                        val skipPos = (currentPos + 4_000L).coerceAtMost(knownTotalDurationMs - 1_000L)
-                        recoverStreamAt(skipPos)
-                        return
-                    }
                     playButton.text = "▶"
                     if (::overlayPlayButton.isInitialized) {
                         overlayPlayButton.setImageDrawable(playVector)
@@ -1038,26 +1035,20 @@ class MainActivity : Activity(), SensorEventListener {
             override fun onPlayerError(error: PlaybackException) {
                 val uri = activePlaybackUri
                 val now = SystemClock.uptimeMillis()
-                if (now - lastErrorTimeMs > 6000L) {
+                if (now - lastErrorTimeMs > 5000L) {
                     consecutiveErrorCount = 0
                 }
                 lastErrorTimeMs = now
 
-                if (uri != null && consecutiveErrorCount < 5) {
+                // Zero-skip (+0ms) exact-position recovery
+                if (uri != null && consecutiveErrorCount < 4) {
                     consecutiveErrorCount++
-                    val basePos = when {
-                        lastRequestedSeekMs >= 0L -> lastRequestedSeekMs
-                        player.currentPosition > 0L -> player.currentPosition
-                        else -> lastKnownGoodPosMs
-                    }
-                    // Jump 4 seconds per retry to clear the entire damaged GOP keyframe cluster
-                    val maxPos = (knownTotalDurationMs - 1_000L).coerceAtLeast(0L)
-                    val targetPosition = if (maxPos > 0L) {
-                        (basePos + consecutiveErrorCount * 4_000L).coerceAtMost(maxPos)
+                    val exactPosition = if (lastRequestedSeekMs >= 0L) {
+                        lastRequestedSeekMs
                     } else {
-                        basePos + consecutiveErrorCount * 4_000L
+                        player.currentPosition.coerceAtLeast(0L)
                     }
-                    recoverStreamAt(targetPosition)
+                    recoverStreamAt(exactPosition)
                     return
                 }
 
@@ -1072,8 +1063,8 @@ class MainActivity : Activity(), SensorEventListener {
 
     private fun recoverStreamAt(targetPositionMs: Long) {
         val uri = activePlaybackUri ?: return
-        val safeTarget = targetPositionMs.coerceAtLeast(0L)
-        lastRequestedSeekMs = safeTarget
+        val exactTarget = targetPositionMs.coerceAtLeast(0L)
+        lastRequestedSeekMs = exactTarget
         mainHandler.postDelayed({
             if (::player.isInitialized && activePlaybackUri == uri) {
                 rebindActiveSurface()
@@ -1081,25 +1072,55 @@ class MainActivity : Activity(), SensorEventListener {
                 player.clearMediaItems()
                 player.setMediaItem(MediaItem.fromUri(uri))
                 player.prepare()
-                if (safeTarget > 0L) {
-                    player.seekTo(safeTarget)
+                if (exactTarget > 0L) {
+                    player.seekTo(exactTarget)
                 }
                 player.playWhenReady = true
             }
-        }, 80L)
+        }, 100L)
+    }
+
+    /**
+     * Recursively prints EVERY frame of the exception and all nested causes
+     * without Android's "... N more" line truncation.
+     */
+    private fun buildCompleteStackTrace(throwable: Throwable): String {
+        val sb = StringBuilder()
+        val visited = IdentityHashMap<Throwable, Boolean>()
+
+        fun appendThrowable(t: Throwable, prefix: String) {
+            if (visited.put(t, true) != null) {
+                sb.appendLine("${prefix}[CIRCULAR REFERENCE: ${t.javaClass.name}: ${t.message}]")
+                return
+            }
+            sb.appendLine("$prefix${t.javaClass.name}: ${t.message ?: "null"}")
+            for (element in t.stackTrace) {
+                sb.appendLine("    at $element")
+            }
+            for (suppressed in t.suppressed) {
+                appendThrowable(suppressed, "Suppressed: ")
+            }
+            t.cause?.let { cause ->
+                appendThrowable(cause, "Caused by: ")
+            }
+        }
+
+        appendThrowable(throwable, "")
+        return sb.toString()
     }
 
     private fun showFullErrorDialog(error: PlaybackException) {
-        val fullTrace = Log.getStackTraceString(error)
+        val untruncatedTrace = buildCompleteStackTrace(error)
         val summary = buildString {
             appendLine("Error Code: ${error.errorCodeName} (${error.errorCode})")
+            appendLine("Timestamp: ${formatTime(player.currentPosition.coerceAtLeast(0L))}")
             appendLine("Message: ${error.message ?: "None"}")
             error.cause?.let { cause ->
                 appendLine("Root Cause: ${cause.javaClass.name}: ${cause.message}")
             }
             appendLine()
-            appendLine("--- Full Stack Trace ---")
-            append(fullTrace)
+            appendLine("--- Complete Stack Trace (Untruncated) ---")
+            append(untruncatedTrace)
         }
 
         val outer = LinearLayout(this).apply {
@@ -1121,13 +1142,13 @@ class MainActivity : Activity(), SensorEventListener {
         }
         val logText = TextView(this).apply {
             text = summary
-            textSize = 11f
+            textSize = 10.5f
             setTextColor(Color.rgb(230, 234, 242))
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
         }
         scrollView.addView(logText)
-        val maxScrollHeight = (resources.displayMetrics.heightPixels * 0.48f).toInt()
+        val maxScrollHeight = (resources.displayMetrics.heightPixels * 0.52f).toInt()
         outer.addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxScrollHeight))
 
         val dialog = AlertDialog.Builder(this)
@@ -1142,7 +1163,7 @@ class MainActivity : Activity(), SensorEventListener {
             setOnClickListener {
                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText("PanoPlay Error", summary))
-                Toast.makeText(this@MainActivity, "Error log copied", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "Full error log copied", Toast.LENGTH_SHORT).show()
             }
         }
         val closeBtn = pillButton("CLOSE", true).apply {
@@ -1163,9 +1184,7 @@ class MainActivity : Activity(), SensorEventListener {
     private fun performSafeSeek(targetMs: Long) {
         val clamped = targetMs.coerceAtLeast(0L)
         lastRequestedSeekMs = clamped
-        lastKnownGoodPosMs = clamped
         consecutiveErrorCount = 0
-        bufferingStartMs = 0L
 
         val state = player.playbackState
         if (state == Player.STATE_IDLE || state == Player.STATE_ENDED || player.playerError != null) {
@@ -2576,8 +2595,6 @@ class MainActivity : Activity(), SensorEventListener {
         activePlaybackUri = uri
         knownTotalDurationMs = 0L
         lastRequestedSeekMs = -1L
-        lastKnownGoodPosMs = 0L
-        bufferingStartMs = 0L
         consecutiveErrorCount = 0
         lastRenderedFrames = 0
         lastFpsCheckTimeMs = 0L
