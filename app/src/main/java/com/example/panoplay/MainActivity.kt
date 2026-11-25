@@ -93,10 +93,9 @@ private class TransportIconDrawable(
 
         when (iconType) {
             Type.PLAY -> {
-                // Optically centered Play triangle inside circle
-                val halfH = h * 0.21f
-                val leftX = cx - w * 0.13f
-                val rightX = cx + w * 0.19f
+                val halfH = h * 0.165f
+                val leftX = cx - w * 0.105f
+                val rightX = cx + w * 0.155f
                 path.reset()
                 path.moveTo(leftX, cy - halfH)
                 path.lineTo(rightX, cy)
@@ -105,10 +104,10 @@ private class TransportIconDrawable(
                 canvas.drawPath(path, paint)
             }
             Type.PAUSE -> {
-                // Exact symmetric dual vertical bars centered in circle
-                val barW = w * 0.085f
-                val halfH = h * 0.20f
-                val gap = w * 0.075f
+                // Slightly smaller, crisp dual bars centered inside blue circle
+                val barW = w * 0.068f
+                val halfH = h * 0.15f
+                val gap = w * 0.058f
                 val r = barW * 0.25f
 
                 rect.set(cx - gap - barW, cy - halfH, cx - gap, cy + halfH)
@@ -118,16 +117,16 @@ private class TransportIconDrawable(
                 canvas.drawRoundRect(rect, r, r, paint)
             }
             Type.REWIND -> {
-                val triW = w * 0.23f
-                val halfH = h * 0.21f
-                // Left triangle
+                // Slightly shorter height and subtly wider triangles
+                val triW = w * 0.26f
+                val halfH = h * 0.165f
                 path.reset()
                 path.moveTo(cx - triW, cy)
                 path.lineTo(cx, cy - halfH)
                 path.lineTo(cx, cy + halfH)
                 path.close()
                 canvas.drawPath(path, paint)
-                // Right triangle
+
                 path.reset()
                 path.moveTo(cx, cy)
                 path.lineTo(cx + triW, cy - halfH)
@@ -136,16 +135,16 @@ private class TransportIconDrawable(
                 canvas.drawPath(path, paint)
             }
             Type.FORWARD -> {
-                val triW = w * 0.23f
-                val halfH = h * 0.21f
-                // Left triangle
+                // Slightly shorter height and subtly wider triangles
+                val triW = w * 0.26f
+                val halfH = h * 0.165f
                 path.reset()
                 path.moveTo(cx - triW, cy - halfH)
                 path.lineTo(cx, cy)
                 path.lineTo(cx - triW, cy + halfH)
                 path.close()
                 canvas.drawPath(path, paint)
-                // Right triangle
+
                 path.reset()
                 path.moveTo(cx, cy - halfH)
                 path.lineTo(cx + triW, cy)
@@ -428,7 +427,8 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
                         activeGesture = GestureMode.BRIGHTNESS
                         startLevel = onBrightnessSwipeStart?.invoke() ?: 0.5f
                         cancelChildTouch(event)
-                    } else if (startX > width * 0.90f) {
+                    } else if (startX > width * 0.85f) {
+                        // Right 15% edge vertical swipe controls volume
                         activeGesture = GestureMode.VOLUME
                         startLevel = onVolumeSwipeStart?.invoke() ?: 0.5f
                         cancelChildTouch(event)
@@ -932,9 +932,9 @@ class MainActivity : Activity() {
             ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
         if (::overlayRotateButton.isInitialized) {
-            overlayRotateButton.text = if (isFullscreenLandscape) "↻  Portrait" else "↻  Landscape"
+            overlayRotateButton.text = if (isFullscreenLandscape) "Portrait" else "Landscape"
         }
-        val modeText = if (isFullscreenLandscape) "↻  LANDSCAPE" else "↻  PORTRAIT"
+        val modeText = if (isFullscreenLandscape) "LANDSCAPE" else "PORTRAIT"
         showCenterHud(modeText, 850L)
     }
 
@@ -1566,7 +1566,6 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
 
-        // Translucent HUD for Brightness, Volume, Speed, Rotation & Seek feedback
         centerHud = text("☀  50%", 14f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(18), dp(10), dp(18), dp(10))
@@ -1628,11 +1627,11 @@ class MainActivity : Activity() {
         }
         videoFrame.addView(fullscreenButton, fullscreenParams)
 
-        // 1. Fullscreen Top Bar (Back arrow + Video Title)
+        // 1. Fullscreen Top Bar (Shifted left so full video name is visible)
         fullscreenTopBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setPadding(dp(6), dp(10), dp(10), dp(10))
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(Color.argb(175, 8, 10, 14), Color.TRANSPARENT)
@@ -1647,12 +1646,12 @@ class MainActivity : Activity() {
             contentDescription = "Exit full screen"
             setOnClickListener { if (isFullscreen) toggleFullscreen() }
         }
-        fullscreenTitleView = text("Now playing", 14f, Color.WHITE, true).apply {
+        fullscreenTitleView = text("Now playing", 13.5f, Color.WHITE, true).apply {
             maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
         }
-        fullscreenTopBar.addView(exitFullscreenBtn, LinearLayout.LayoutParams(dp(38), dp(36)).apply {
-            rightMargin = dp(8)
+        fullscreenTopBar.addView(exitFullscreenBtn, LinearLayout.LayoutParams(dp(34), dp(36)).apply {
+            rightMargin = dp(2)
         })
         fullscreenTopBar.addView(fullscreenTitleView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         videoFrame.addView(
@@ -1660,7 +1659,7 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP)
         )
 
-        // 2. Fullscreen Center Transport Row (Clean white vector Rewind  |  Centered Blue Circle Play/Pause  |  Clean white vector Forward)
+        // 2. Fullscreen Center Transport Row (Slightly shorter & subtly wider Rewind/Forward + compact Play/Pause)
         fullscreenCenterControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1703,12 +1702,12 @@ class MainActivity : Activity() {
                 player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(44), dp(44)).apply {
-            rightMargin = dp(34)
+        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(46), dp(38)).apply {
+            rightMargin = dp(32)
         })
-        fullscreenCenterControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(68), dp(68)))
-        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(44), dp(44)).apply {
-            leftMargin = dp(34)
+        fullscreenCenterControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(66), dp(66)))
+        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(46), dp(38)).apply {
+            leftMargin = dp(32)
         })
         videoFrame.addView(
             fullscreenCenterControls,
@@ -1770,7 +1769,7 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
-        // Bottom pills row below slider: Clean Speed (no lightning icon) & Landscape
+        // Bottom pills row below slider: Clean Speed & Clean Landscape (no icons)
         val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1784,9 +1783,9 @@ class MainActivity : Activity() {
             isFocusable = true
             setOnClickListener { showSpeedPicker(this) }
         }
-        overlayRotateButton = text("↻  Landscape", 12f, Color.WHITE, true).apply {
+        overlayRotateButton = text("Landscape", 12f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(18), dp(9), dp(18), dp(9))
+            setPadding(dp(20), dp(9), dp(20), dp(9))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
@@ -2170,7 +2169,7 @@ class MainActivity : Activity() {
             rootLayout.clipToPadding = false
             rootLayout.clipChildren = false
             window.setBackgroundDrawableResource(android.R.color.black)
-            overlayRotateButton.text = "↻  Landscape"
+            overlayRotateButton.text = "Landscape"
             overlayPlayButton.setImageDrawable(if (player.isPlaying) pauseVector else playVector)
             (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
             (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
