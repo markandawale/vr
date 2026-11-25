@@ -68,7 +68,7 @@ import kotlin.math.abs
 import kotlin.math.min
 
 /**
- * Pixel-accurate vector icons for fullscreen Play, Pause, Rewind, and Forward controls.
+ * Exact Material / Google Files vector icons for Play, Pause, Rewind, and Forward.
  */
 private class TransportIconDrawable(
     private val iconType: Type,
@@ -93,8 +93,9 @@ private class TransportIconDrawable(
 
         when (iconType) {
             Type.PLAY -> {
-                val halfH = h * 0.165f
-                val leftX = cx - w * 0.105f
+                // Exact centroid-centered Play triangle inside circle
+                val halfH = h * 0.145f
+                val leftX = cx - w * 0.095f
                 val rightX = cx + w * 0.155f
                 path.reset()
                 path.moveTo(leftX, cy - halfH)
@@ -104,51 +105,66 @@ private class TransportIconDrawable(
                 canvas.drawPath(path, paint)
             }
             Type.PAUSE -> {
-                // Slightly smaller, crisp dual bars centered inside blue circle
-                val barW = w * 0.068f
-                val halfH = h * 0.15f
-                val gap = w * 0.058f
-                val r = barW * 0.25f
+                // Clean compact dual vertical pause bars centered inside circle
+                val barW = w * 0.056f
+                val halfH = h * 0.14f
+                val gap = w * 0.044f
 
                 rect.set(cx - gap - barW, cy - halfH, cx - gap, cy + halfH)
-                canvas.drawRoundRect(rect, r, r, paint)
+                canvas.drawRect(rect, paint)
 
                 rect.set(cx + gap, cy - halfH, cx + gap + barW, cy + halfH)
-                canvas.drawRoundRect(rect, r, r, paint)
+                canvas.drawRect(rect, paint)
             }
             Type.REWIND -> {
-                // Slightly shorter height and subtly wider triangles
-                val triW = w * 0.26f
-                val halfH = h * 0.165f
+                // Overlapping sharp Material fast-rewind double triangles
+                val halfH = h * 0.34f
+                val triW = w * 0.38f
+                val overlap = w * 0.14f
+
+                // Left triangle
+                val lTipX = cx - triW + overlap * 0.5f
+                val lBaseX = lTipX + triW
                 path.reset()
-                path.moveTo(cx - triW, cy)
-                path.lineTo(cx, cy - halfH)
-                path.lineTo(cx, cy + halfH)
+                path.moveTo(lTipX, cy)
+                path.lineTo(lBaseX, cy - halfH)
+                path.lineTo(lBaseX, cy + halfH)
                 path.close()
                 canvas.drawPath(path, paint)
 
+                // Right triangle overlapping the first
+                val rTipX = lBaseX - overlap
+                val rBaseX = rTipX + triW
                 path.reset()
-                path.moveTo(cx, cy)
-                path.lineTo(cx + triW, cy - halfH)
-                path.lineTo(cx + triW, cy + halfH)
+                path.moveTo(rTipX, cy)
+                path.lineTo(rBaseX, cy - halfH)
+                path.lineTo(rBaseX, cy + halfH)
                 path.close()
                 canvas.drawPath(path, paint)
             }
             Type.FORWARD -> {
-                // Slightly shorter height and subtly wider triangles
-                val triW = w * 0.26f
-                val halfH = h * 0.165f
+                // Overlapping sharp Material fast-forward double triangles
+                val halfH = h * 0.34f
+                val triW = w * 0.38f
+                val overlap = w * 0.14f
+
+                // Left triangle
+                val lBaseX = cx - triW + overlap * 0.5f
+                val lTipX = lBaseX + triW
                 path.reset()
-                path.moveTo(cx - triW, cy - halfH)
-                path.lineTo(cx, cy)
-                path.lineTo(cx - triW, cy + halfH)
+                path.moveTo(lBaseX, cy - halfH)
+                path.lineTo(lTipX, cy)
+                path.lineTo(lBaseX, cy + halfH)
                 path.close()
                 canvas.drawPath(path, paint)
 
+                // Right triangle overlapping the first
+                val rBaseX = lTipX - overlap
+                val rTipX = rBaseX + triW
                 path.reset()
-                path.moveTo(cx, cy - halfH)
-                path.lineTo(cx + triW, cy)
-                path.lineTo(cx, cy + halfH)
+                path.moveTo(rBaseX, cy - halfH)
+                path.lineTo(rTipX, cy)
+                path.lineTo(rBaseX, cy + halfH)
                 path.close()
                 canvas.drawPath(path, paint)
             }
@@ -428,7 +444,6 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
                         startLevel = onBrightnessSwipeStart?.invoke() ?: 0.5f
                         cancelChildTouch(event)
                     } else if (startX > width * 0.85f) {
-                        // Right 15% edge vertical swipe controls volume
                         activeGesture = GestureMode.VOLUME
                         startLevel = onVolumeSwipeStart?.invoke() ?: 0.5f
                         cancelChildTouch(event)
@@ -587,8 +602,9 @@ class MainActivity : Activity() {
     private var currentBrightness = -1f
     private var lastRenderedFrames = 0
     private var lastFpsCheckTimeMs = 0L
-    private var showFpsEnabled = true
-    private var showModeBadgeEnabled = true
+    // Both badges default to OFF; user can turn them on anytime from Settings
+    private var showFpsEnabled = false
+    private var showModeBadgeEnabled = false
 
     @Volatile
     private var audioOffsetMs = 0
@@ -700,8 +716,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        showFpsEnabled = prefs.getBoolean(KEY_SHOW_FPS, true)
-        showModeBadgeEnabled = prefs.getBoolean(KEY_SHOW_MODE_BADGE, true)
+        showFpsEnabled = prefs.getBoolean(KEY_SHOW_FPS, false)
+        showModeBadgeEnabled = prefs.getBoolean(KEY_SHOW_MODE_BADGE, false)
         audioOffsetMs = prefs.getInt(KEY_AUDIO_OFFSET_MS, 0).coerceIn(-1000, 1000)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
@@ -1627,7 +1643,7 @@ class MainActivity : Activity() {
         }
         videoFrame.addView(fullscreenButton, fullscreenParams)
 
-        // 1. Fullscreen Top Bar (Shifted left so full video name is visible)
+        // 1. Fullscreen Top Bar
         fullscreenTopBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1659,7 +1675,7 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP)
         )
 
-        // 2. Fullscreen Center Transport Row (Slightly shorter & subtly wider Rewind/Forward + compact Play/Pause)
+        // 2. Fullscreen Center Transport Row (Exact reference overlapping Rewind/Forward + centered Play/Pause)
         fullscreenCenterControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1702,19 +1718,19 @@ class MainActivity : Activity() {
                 player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(46), dp(38)).apply {
-            rightMargin = dp(32)
+        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(34), dp(26)).apply {
+            rightMargin = dp(44)
         })
-        fullscreenCenterControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(66), dp(66)))
-        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(46), dp(38)).apply {
-            leftMargin = dp(32)
+        fullscreenCenterControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(64), dp(64)))
+        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(34), dp(26)).apply {
+            leftMargin = dp(44)
         })
         videoFrame.addView(
             fullscreenCenterControls,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
         )
 
-        // 3. Fullscreen Bottom Dock (Slider row on top, Speed & Landscape pills below slider)
+        // 3. Fullscreen Bottom Dock
         fullscreenBottomControls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -1769,7 +1785,6 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
-        // Bottom pills row below slider: Clean Speed & Clean Landscape (no icons)
         val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
