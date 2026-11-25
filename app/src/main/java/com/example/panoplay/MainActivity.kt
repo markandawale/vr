@@ -93,7 +93,6 @@ private class TransportIconDrawable(
 
         when (iconType) {
             Type.PLAY -> {
-                // Exact centroid-centered Play triangle inside circle
                 val halfH = h * 0.145f
                 val leftX = cx - w * 0.095f
                 val rightX = cx + w * 0.155f
@@ -105,7 +104,6 @@ private class TransportIconDrawable(
                 canvas.drawPath(path, paint)
             }
             Type.PAUSE -> {
-                // Clean compact dual vertical pause bars centered inside circle
                 val barW = w * 0.056f
                 val halfH = h * 0.14f
                 val gap = w * 0.044f
@@ -117,13 +115,15 @@ private class TransportIconDrawable(
                 canvas.drawRect(rect, paint)
             }
             Type.REWIND -> {
-                // Overlapping sharp Material fast-rewind double triangles
+                // Exact tall-proportioned Material fast-rewind triangles (matches reference 1000063562.jpg)
                 val halfH = h * 0.34f
-                val triW = w * 0.38f
-                val overlap = w * 0.14f
+                val triW = halfH * 1.32f
+                val overlap = triW * 0.22f
+                val totalW = triW * 2f - overlap
+                val startX = cx - totalW * 0.5f
 
                 // Left triangle
-                val lTipX = cx - triW + overlap * 0.5f
+                val lTipX = startX
                 val lBaseX = lTipX + triW
                 path.reset()
                 path.moveTo(lTipX, cy)
@@ -132,7 +132,7 @@ private class TransportIconDrawable(
                 path.close()
                 canvas.drawPath(path, paint)
 
-                // Right triangle overlapping the first
+                // Right triangle slightly overlapping the first
                 val rTipX = lBaseX - overlap
                 val rBaseX = rTipX + triW
                 path.reset()
@@ -143,13 +143,15 @@ private class TransportIconDrawable(
                 canvas.drawPath(path, paint)
             }
             Type.FORWARD -> {
-                // Overlapping sharp Material fast-forward double triangles
+                // Exact tall-proportioned Material fast-forward triangles (matches reference 1000063562.jpg)
                 val halfH = h * 0.34f
-                val triW = w * 0.38f
-                val overlap = w * 0.14f
+                val triW = halfH * 1.32f
+                val overlap = triW * 0.22f
+                val totalW = triW * 2f - overlap
+                val startX = cx - totalW * 0.5f
 
                 // Left triangle
-                val lBaseX = cx - triW + overlap * 0.5f
+                val lBaseX = startX
                 val lTipX = lBaseX + triW
                 path.reset()
                 path.moveTo(lBaseX, cy - halfH)
@@ -158,7 +160,7 @@ private class TransportIconDrawable(
                 path.close()
                 canvas.drawPath(path, paint)
 
-                // Right triangle overlapping the first
+                // Right triangle slightly overlapping the first
                 val rBaseX = lTipX - overlap
                 val rTipX = rBaseX + triW
                 path.reset()
@@ -589,6 +591,7 @@ class MainActivity : Activity() {
     private lateinit var rootLayout: LinearLayout
     private lateinit var speedButton: TextView
     private lateinit var overlaySpeedButton: TextView
+    private lateinit var overlayRecenterButton: TextView
     private lateinit var overlayRotateButton: TextView
 
     private val playVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PLAY, Color.rgb(14, 16, 22)) }
@@ -602,7 +605,6 @@ class MainActivity : Activity() {
     private var currentBrightness = -1f
     private var lastRenderedFrames = 0
     private var lastFpsCheckTimeMs = 0L
-    // Both badges default to OFF; user can turn them on anytime from Settings
     private var showFpsEnabled = false
     private var showModeBadgeEnabled = false
 
@@ -1675,7 +1677,7 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP)
         )
 
-        // 2. Fullscreen Center Transport Row (Exact reference overlapping Rewind/Forward + centered Play/Pause)
+        // 2. Fullscreen Center Transport Row (Exact reference equilateral overlapping Rewind/Forward + centered Play/Pause)
         fullscreenCenterControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1718,12 +1720,12 @@ class MainActivity : Activity() {
                 player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(34), dp(26)).apply {
-            rightMargin = dp(44)
+        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(26), dp(22)).apply {
+            rightMargin = dp(48)
         })
         fullscreenCenterControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(64), dp(64)))
-        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(34), dp(26)).apply {
-            leftMargin = dp(44)
+        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(26), dp(22)).apply {
+            leftMargin = dp(48)
         })
         videoFrame.addView(
             fullscreenCenterControls,
@@ -1785,6 +1787,7 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
+        // Bottom pills row below slider: Speed | Recenter | Landscape
         val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1792,22 +1795,38 @@ class MainActivity : Activity() {
         }
         overlaySpeedButton = text("1.0x", 12f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(20), dp(9), dp(20), dp(9))
+            setPadding(dp(18), dp(9), dp(18), dp(9))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
             setOnClickListener { showSpeedPicker(this) }
         }
+        overlayRecenterButton = text("Recenter", 12f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(9), dp(18), dp(9))
+            background = rounded(Color.argb(145, 28, 32, 42), 22)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+                    vrSurfaceView.resetView()
+                    showCenterHud("CENTERED", 750L)
+                }
+            }
+        }
         overlayRotateButton = text("Landscape", 12f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(20), dp(9), dp(20), dp(9))
+            setPadding(dp(18), dp(9), dp(18), dp(9))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
             setOnClickListener { toggleFullscreenOrientation() }
         }
         bottomPillsRow.addView(overlaySpeedButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            rightMargin = dp(12)
+            rightMargin = dp(10)
+        })
+        bottomPillsRow.addView(overlayRecenterButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            rightMargin = dp(10)
         })
         bottomPillsRow.addView(overlayRotateButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         fullscreenBottomControls.addView(
