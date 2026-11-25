@@ -27,6 +27,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
@@ -56,6 +57,9 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.BaseDataSource
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -65,11 +69,131 @@ import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.ui.PlayerView
+import java.io.EOFException
+import java.io.FileInputStream
+import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.util.ArrayList
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
+
+/**
+ * Uses ParcelFileDescriptor + FileChannel.position() (64-bit OS lseek) for content:// URIs.
+ * Prevents ERROR_CODE_IO_UNSPECIFIED when seeking deep (e.g. 30+ mins) into multi-GB MP4 files.
+ */
+@OptIn(UnstableApi::class)
+private class SeekSafeContentDataSource(private val context: Context) : BaseDataSource(/* isNetwork= */ false) {
+    private val fallback = DefaultDataSource.Factory(context).createDataSource()
+    private var usingFallback = false
+    private var uri: Uri? = null
+    private var pfd: ParcelFileDescriptor? = null
+    private var fis: FileInputStream? = null
+    private var channel: FileChannel? = null
+    private var bytesRemaining: Long = 0
+    private var opened = false
+
+    override fun open(dataSpec: DataSpec): Long {
+        uri = dataSpec.uri
+        if (dataSpec.uri.scheme != "content") {
+            usingFallback = true
+            return fallback.open(dataSpec)
+        }
+        usingFallback = false
+        transferInitializing(dataSpec)
+        try {
+            val descriptor = context.contentResolver.openFileDescriptor(dataSpec.uri, "r")
+                ?: throw IOException("Unable to open file descriptor for ${dataSpec.uri}")
+            pfd = descriptor
+            val stream = FileInputStream(descriptor.fileDescriptor)
+            fis = stream
+            val fc = stream.channel
+            channel = fc
+
+            val totalSize = fc.size()
+            if (dataSpec.position > totalSize) {
+                throw EOFException("Seek position ${dataSpec.position} beyond file size $totalSize")
+            }
+            fc.position(dataSpec.position)
+
+            bytesRemaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
+                dataSpec.length
+            } else {
+                (totalSize - dataSpec.position).coerceAtLeast(0L)
+            }
+            opened = true
+            transferStarted(dataSpec)
+            return bytesRemaining
+        } catch (e: IOException) {
+            close()
+            // Fallback to standard DefaultDataSource if provider uses a non-seekable pipe
+            usingFallback = true
+            return fallback.open(dataSpec)
+        }
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (usingFallback) return fallback.read(buffer, offset, length)
+        if (length == 0) return 0
+        if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
+
+        val toRead = if (bytesRemaining == C.LENGTH_UNSET.toLong()) {
+            length
+        } else {
+            min(bytesRemaining, length.toLong()).toInt()
+        }
+        val fc = channel ?: return C.RESULT_END_OF_INPUT
+        val readCount = fc.read(ByteBuffer.wrap(buffer, offset, toRead))
+        if (readCount <= 0) {
+            return C.RESULT_END_OF_INPUT
+        }
+        if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
+            bytesRemaining -= readCount.toLong()
+        }
+        bytesTransferred(readCount)
+        return readCount
+    }
+
+    override fun getUri(): Uri? = if (usingFallback) fallback.uri else uri
+
+    override fun close() {
+        uri = null
+        if (usingFallback) {
+            usingFallback = false
+            fallback.close()
+            return
+        }
+        try {
+            channel?.close()
+        } catch (_: IOException) {
+        } finally {
+            channel = null
+        }
+        try {
+            fis?.close()
+        } catch (_: IOException) {
+        } finally {
+            fis = null
+        }
+        try {
+            pfd?.close()
+        } catch (_: IOException) {
+        } finally {
+            pfd = null
+        }
+        if (opened) {
+            opened = false
+            transferEnded()
+        }
+    }
+
+    class Factory(private val context: Context) : DataSource.Factory {
+        override fun createDataSource(): DataSource = SeekSafeContentDataSource(context)
+    }
+}
 
 /**
  * Exact Material vector icons matching reference screenshot (1000063554.jpg)
@@ -107,7 +231,6 @@ private class PillIconDrawable(
 
         when (iconType) {
             Type.RECENTER -> {
-                // Exact crosshair ring + center dot + 4 outer ticks
                 strokePaint.strokeWidth = s * 0.11f
                 val r = s * 0.30f
                 canvas.drawCircle(cx, cy, r, strokePaint)
@@ -115,20 +238,17 @@ private class PillIconDrawable(
 
                 val tickStart = r + s * 0.02f
                 val tickEnd = s * 0.46f
-                // Top, Bottom, Left, Right ticks
                 canvas.drawLine(cx, cy - tickStart, cx, cy - tickEnd, strokePaint)
                 canvas.drawLine(cx, cy + tickStart, cx, cy + tickEnd, strokePaint)
                 canvas.drawLine(cx - tickStart, cy, cx - tickEnd, cy, strokePaint)
                 canvas.drawLine(cx + tickStart, cy, cx + tickEnd, cy, strokePaint)
             }
             Type.MOTION -> {
-                // Solid circle with compass diamond cutout (EvenOdd fill)
                 val r = s * 0.42f
                 path.reset()
                 path.fillType = Path.FillType.EVEN_ODD
                 path.addCircle(cx, cy, r, Path.Direction.CW)
 
-                // Diagonal compass needle diamond (NE to SW)
                 val tipDist = r * 0.64f
                 val sideDist = r * 0.23f
                 val diag = 0.7071f
@@ -148,18 +268,15 @@ private class PillIconDrawable(
                 path.close()
                 canvas.drawPath(path, fillPaint)
 
-                // Center pivot dot inside compass needle
                 canvas.drawCircle(cx, cy, r * 0.11f, fillPaint)
             }
             Type.SPEED -> {
-                // Speedometer half-gauge arc + solid lower base + angled needle
                 val gaugeCy = cy + s * 0.16f
                 val outerR = s * 0.40f
                 strokePaint.strokeWidth = s * 0.10f
                 oval.set(cx - outerR, gaugeCy - outerR, cx + outerR, gaugeCy + outerR)
                 canvas.drawArc(oval, 185f, 170f, false, strokePaint)
 
-                // Solid lower arch body with needle cutout
                 path.reset()
                 path.fillType = Path.FillType.EVEN_ODD
                 val innerR = s * 0.25f
@@ -170,7 +287,6 @@ private class PillIconDrawable(
                 path.close()
                 canvas.drawPath(path, fillPaint)
 
-                // Speedometer needle pointing top-right (~45 deg)
                 strokePaint.strokeWidth = s * 0.11f
                 canvas.drawLine(
                     cx - s * 0.03f,
@@ -381,7 +497,7 @@ private class VolumeVectorDrawable(
 }
 
 /**
- * Custom sleek cinema-style seek slider for fullscreen mode (extended closer to left/right timestamps).
+ * Custom sleek cinema-style seek slider for fullscreen mode.
  */
 private class CinemaSeekBar(context: Context) : View(context) {
     var max: Int = 1000
@@ -894,8 +1010,12 @@ class MainActivity : Activity(), SensorEventListener {
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        val dataSourceFactory = DefaultDataSource.Factory(this)
-        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+        // Use 64-bit FileChannel seek + CBR seek fallback so deep seeks (30+ mins) never fail
+        val dataSourceFactory = SeekSafeContentDataSource.Factory(this)
+        val extractorsFactory = DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setConstantBitrateSeekingAlwaysEnabled(true)
+        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory)
 
         player = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
@@ -946,7 +1066,7 @@ class MainActivity : Activity(), SensorEventListener {
             override fun onPlayerError(error: PlaybackException) {
                 val uri = activeMediaUri
                 if (uri != null &&
-                    ioRetryCount < 2 &&
+                    ioRetryCount < 3 &&
                     (error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
                         error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ||
                         error.errorCode == PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE)
@@ -958,14 +1078,11 @@ class MainActivity : Activity(), SensorEventListener {
                             rebindActiveSurface()
                             player.stop()
                             player.clearMediaItems()
-                            player.setMediaItem(MediaItem.fromUri(uri))
-                            if (resumePosition > 0L) {
-                                player.seekTo(resumePosition)
-                            }
+                            player.setMediaItem(MediaItem.fromUri(uri), resumePosition)
                             player.prepare()
                             player.playWhenReady = true
                         }
-                    }, 180L)
+                    }, 120L)
                     return
                 }
 
@@ -974,7 +1091,9 @@ class MainActivity : Activity(), SensorEventListener {
                     "Can't play this video: ${error.errorCodeName}",
                     Toast.LENGTH_LONG
                 ).show()
-                placeholder.visibility = View.VISIBLE
+                if (activeMediaUri == null) {
+                    placeholder.visibility = View.VISIBLE
+                }
             }
         })
         mainHandler.post(progressUpdater)
@@ -1954,7 +2073,7 @@ class MainActivity : Activity(), SensorEventListener {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
         )
 
-        // 3. Fullscreen Bottom Dock (Longer slider extending closer to timestamps + Reference icons on pills)
+        // 3. Fullscreen Bottom Dock
         fullscreenBottomControls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -2001,7 +2120,6 @@ class MainActivity : Activity(), SensorEventListener {
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
             includeFontPadding = false
         }
-        // WRAP_CONTENT timestamps with tight 5dp margin so the slider spans wide across both sides
         fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
             rightMargin = dp(5)
         })
@@ -2014,7 +2132,7 @@ class MainActivity : Activity(), SensorEventListener {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
-        // Bottom pills row below slider with exact reference icons (1000063554.jpg)
+        // Bottom pills row below slider (Silent Recenter without popup text)
         val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -2039,7 +2157,6 @@ class MainActivity : Activity(), SensorEventListener {
             setOnClickListener {
                 if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
                     vrSurfaceView.resetView()
-                    showCenterHud("CENTERED", 750L)
                 }
             }
         }
