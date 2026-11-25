@@ -67,6 +67,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
@@ -727,7 +728,10 @@ class MainActivity : Activity(), SensorEventListener {
     private var vrOutputSurface: Surface? = null
     private var pendingMediaUri: Uri? = null
     private var activePlaybackUri: Uri? = null
+    private var knownTotalDurationMs: Long = 0L
     private var lastRequestedSeekMs: Long = -1L
+    private var lastKnownGoodPosMs: Long = 0L
+    private var bufferingStartMs: Long = 0L
     private var consecutiveErrorCount = 0
     private var lastErrorTimeMs = 0L
 
@@ -806,8 +810,31 @@ class MainActivity : Activity(), SensorEventListener {
     private val progressUpdater = object : Runnable {
         override fun run() {
             if (::player.isInitialized) {
-                val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+                val rawDuration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+                if (rawDuration > 0L) knownTotalDurationMs = rawDuration
+                val duration = if (rawDuration > 0L) rawDuration else knownTotalDurationMs
+
                 val position = player.currentPosition.coerceAtLeast(0L)
+                if (player.playbackState == Player.STATE_READY && position > 0L) {
+                    lastKnownGoodPosMs = position
+                    bufferingStartMs = 0L
+                }
+
+                // Stall watchdog: if buffering hangs > 3s on a damaged GOP, jump ahead to next clean keyframe
+                if (player.playbackState == Player.STATE_BUFFERING && player.playWhenReady && activePlaybackUri != null) {
+                    val now = SystemClock.uptimeMillis()
+                    if (bufferingStartMs == 0L) {
+                        bufferingStartMs = now
+                    } else if (now - bufferingStartMs > 3000L) {
+                        bufferingStartMs = now
+                        val anchor = if (lastRequestedSeekMs >= 0L) lastRequestedSeekMs else lastKnownGoodPosMs
+                        val nextKeyframePos = (anchor + 4_000L).coerceAtMost((duration - 1_000L).coerceAtLeast(0L))
+                        recoverStreamAt(nextKeyframePos)
+                    }
+                } else {
+                    bufferingStartMs = 0L
+                }
+
                 val progressPermille = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
                 if (!isScrubbing) {
                     seekBar.max = 1000
@@ -933,7 +960,6 @@ class MainActivity : Activity(), SensorEventListener {
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        // SafeGuardDataSource prevents regionLength=-1 ArrayIndexOutOfBoundsException in IoBridge.read()
         val dataSourceFactory = SafeGuardDataSource.Factory(this)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
         val loadControl = DefaultLoadControl.Builder()
@@ -951,6 +977,7 @@ class MainActivity : Activity(), SensorEventListener {
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, true)
             .build()
+        player.setSeekParameters(SeekParameters.NEXT_SYNC)
 
         buildInterface()
 
@@ -969,12 +996,26 @@ class MainActivity : Activity(), SensorEventListener {
                 if (playbackState == Player.STATE_READY) {
                     consecutiveErrorCount = 0
                     lastRequestedSeekMs = -1L
+                    bufferingStartMs = 0L
                     placeholder.visibility = View.GONE
                     val resolvedName = currentVideoName.ifBlank { "Now playing" }
                     titleView.text = resolvedName
                     if (::fullscreenTitleView.isInitialized) fullscreenTitleView.text = resolvedName
                 }
                 if (playbackState == Player.STATE_ENDED) {
+                    val currentPos = player.currentPosition.coerceAtLeast(0L)
+                    // If SafeGuardDataSource hit a corrupted MP4 sample (-1) well before actual video end,
+                    // jump +4s past the damaged GOP cluster instead of freezing at STATE_ENDED.
+                    if (activePlaybackUri != null &&
+                        knownTotalDurationMs > 15_000L &&
+                        currentPos < knownTotalDurationMs - 8_000L &&
+                        consecutiveErrorCount < 5
+                    ) {
+                        consecutiveErrorCount++
+                        val skipPos = (currentPos + 4_000L).coerceAtMost(knownTotalDurationMs - 1_000L)
+                        recoverStreamAt(skipPos)
+                        return
+                    }
                     playButton.text = "▶"
                     if (::overlayPlayButton.isInitialized) {
                         overlayPlayButton.setImageDrawable(playVector)
@@ -997,33 +1038,26 @@ class MainActivity : Activity(), SensorEventListener {
             override fun onPlayerError(error: PlaybackException) {
                 val uri = activePlaybackUri
                 val now = SystemClock.uptimeMillis()
-                if (now - lastErrorTimeMs > 5000L) {
+                if (now - lastErrorTimeMs > 6000L) {
                     consecutiveErrorCount = 0
                 }
                 lastErrorTimeMs = now
 
-                if (uri != null && consecutiveErrorCount < 4) {
+                if (uri != null && consecutiveErrorCount < 5) {
                     consecutiveErrorCount++
-                    val basePos = if (lastRequestedSeekMs >= 0L) {
-                        lastRequestedSeekMs
-                    } else {
-                        player.currentPosition.coerceAtLeast(0L)
+                    val basePos = when {
+                        lastRequestedSeekMs >= 0L -> lastRequestedSeekMs
+                        player.currentPosition > 0L -> player.currentPosition
+                        else -> lastKnownGoodPosMs
                     }
-                    // Step forward slightly (+350ms) on retry to skip past any corrupted MP4 sample frame
-                    val targetPosition = basePos + (consecutiveErrorCount * 350L)
-                    mainHandler.postDelayed({
-                        if (::player.isInitialized && activePlaybackUri == uri) {
-                            rebindActiveSurface()
-                            player.stop()
-                            player.clearMediaItems()
-                            player.setMediaItem(MediaItem.fromUri(uri))
-                            player.prepare()
-                            if (targetPosition > 0L) {
-                                player.seekTo(targetPosition)
-                            }
-                            player.playWhenReady = true
-                        }
-                    }, 100L)
+                    // Jump 4 seconds per retry to clear the entire damaged GOP keyframe cluster
+                    val maxPos = (knownTotalDurationMs - 1_000L).coerceAtLeast(0L)
+                    val targetPosition = if (maxPos > 0L) {
+                        (basePos + consecutiveErrorCount * 4_000L).coerceAtMost(maxPos)
+                    } else {
+                        basePos + consecutiveErrorCount * 4_000L
+                    }
+                    recoverStreamAt(targetPosition)
                     return
                 }
 
@@ -1034,6 +1068,25 @@ class MainActivity : Activity(), SensorEventListener {
             }
         })
         mainHandler.post(progressUpdater)
+    }
+
+    private fun recoverStreamAt(targetPositionMs: Long) {
+        val uri = activePlaybackUri ?: return
+        val safeTarget = targetPositionMs.coerceAtLeast(0L)
+        lastRequestedSeekMs = safeTarget
+        mainHandler.postDelayed({
+            if (::player.isInitialized && activePlaybackUri == uri) {
+                rebindActiveSurface()
+                player.stop()
+                player.clearMediaItems()
+                player.setMediaItem(MediaItem.fromUri(uri))
+                player.prepare()
+                if (safeTarget > 0L) {
+                    player.seekTo(safeTarget)
+                }
+                player.playWhenReady = true
+            }
+        }, 80L)
     }
 
     private fun showFullErrorDialog(error: PlaybackException) {
@@ -1110,7 +1163,19 @@ class MainActivity : Activity(), SensorEventListener {
     private fun performSafeSeek(targetMs: Long) {
         val clamped = targetMs.coerceAtLeast(0L)
         lastRequestedSeekMs = clamped
-        player.seekTo(clamped)
+        lastKnownGoodPosMs = clamped
+        consecutiveErrorCount = 0
+        bufferingStartMs = 0L
+
+        val state = player.playbackState
+        if (state == Player.STATE_IDLE || state == Player.STATE_ENDED || player.playerError != null) {
+            recoverStreamAt(clamped)
+        } else {
+            player.seekTo(clamped)
+            if (!player.isPlaying) {
+                player.playWhenReady = true
+            }
+        }
     }
 
     private fun setPillLeftIcon(view: TextView, icon: PillIconDrawable, tintColor: Int) {
@@ -2101,14 +2166,14 @@ class MainActivity : Activity(), SensorEventListener {
                 isScrubbing = true
             }
             onProgressScrub = { value ->
-                val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+                val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
                 val previewMs = (value.toLong() * d) / 1000L
                 fullscreenCurrentTime.text = formatTime(previewMs)
                 showCenterHud(formatTime(previewMs))
             }
             onStopScrub = { value ->
-                val d = player.duration
-                if (d != C.TIME_UNSET && d > 0L) {
+                val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
+                if (d > 0L) {
                     performSafeSeek((value.toLong() * d) / 1000L)
                 }
                 isScrubbing = false
@@ -2285,15 +2350,15 @@ class MainActivity : Activity(), SensorEventListener {
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onStartTrackingTouch(seekBar: SeekBar?) { isScrubbing = true }
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    val duration = player.duration
-                    if (duration != C.TIME_UNSET && duration > 0L) {
+                    val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
+                    if (duration > 0L) {
                         performSafeSeek((this@MainActivity.seekBar.progress / 1000f * duration).toLong())
                     }
                     isScrubbing = false
                 }
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (fromUser) {
-                        val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+                        val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
                         currentTimeView.text = formatTime((duration * progress) / 1000L)
                     }
                 }
@@ -2509,7 +2574,10 @@ class MainActivity : Activity(), SensorEventListener {
 
     private fun startPlayback(uri: Uri) {
         activePlaybackUri = uri
+        knownTotalDurationMs = 0L
         lastRequestedSeekMs = -1L
+        lastKnownGoodPosMs = 0L
+        bufferingStartMs = 0L
         consecutiveErrorCount = 0
         lastRenderedFrames = 0
         lastFpsCheckTimeMs = 0L
