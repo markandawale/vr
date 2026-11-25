@@ -27,7 +27,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
@@ -57,9 +56,6 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.BaseDataSource
-import androidx.media3.datasource.DataSource
-import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -69,131 +65,11 @@ import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.ui.PlayerView
-import java.io.EOFException
-import java.io.FileInputStream
-import java.io.IOException
-import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
 import java.util.ArrayList
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
-
-/**
- * Uses ParcelFileDescriptor + FileChannel.position() (64-bit OS lseek) for content:// URIs.
- * Prevents ERROR_CODE_IO_UNSPECIFIED when seeking deep (e.g. 30+ mins) into multi-GB MP4 files.
- */
-@OptIn(UnstableApi::class)
-private class SeekSafeContentDataSource(private val context: Context) : BaseDataSource(/* isNetwork= */ false) {
-    private val fallback = DefaultDataSource.Factory(context).createDataSource()
-    private var usingFallback = false
-    private var uri: Uri? = null
-    private var pfd: ParcelFileDescriptor? = null
-    private var fis: FileInputStream? = null
-    private var channel: FileChannel? = null
-    private var bytesRemaining: Long = 0
-    private var opened = false
-
-    override fun open(dataSpec: DataSpec): Long {
-        uri = dataSpec.uri
-        if (dataSpec.uri.scheme != "content") {
-            usingFallback = true
-            return fallback.open(dataSpec)
-        }
-        usingFallback = false
-        transferInitializing(dataSpec)
-        try {
-            val descriptor = context.contentResolver.openFileDescriptor(dataSpec.uri, "r")
-                ?: throw IOException("Unable to open file descriptor for ${dataSpec.uri}")
-            pfd = descriptor
-            val stream = FileInputStream(descriptor.fileDescriptor)
-            fis = stream
-            val fc = stream.channel
-            channel = fc
-
-            val totalSize = fc.size()
-            if (dataSpec.position > totalSize) {
-                throw EOFException("Seek position ${dataSpec.position} beyond file size $totalSize")
-            }
-            fc.position(dataSpec.position)
-
-            bytesRemaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
-                dataSpec.length
-            } else {
-                (totalSize - dataSpec.position).coerceAtLeast(0L)
-            }
-            opened = true
-            transferStarted(dataSpec)
-            return bytesRemaining
-        } catch (e: IOException) {
-            close()
-            // Fallback to standard DefaultDataSource if provider uses a non-seekable pipe
-            usingFallback = true
-            return fallback.open(dataSpec)
-        }
-    }
-
-    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-        if (usingFallback) return fallback.read(buffer, offset, length)
-        if (length == 0) return 0
-        if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
-
-        val toRead = if (bytesRemaining == C.LENGTH_UNSET.toLong()) {
-            length
-        } else {
-            min(bytesRemaining, length.toLong()).toInt()
-        }
-        val fc = channel ?: return C.RESULT_END_OF_INPUT
-        val readCount = fc.read(ByteBuffer.wrap(buffer, offset, toRead))
-        if (readCount <= 0) {
-            return C.RESULT_END_OF_INPUT
-        }
-        if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
-            bytesRemaining -= readCount.toLong()
-        }
-        bytesTransferred(readCount)
-        return readCount
-    }
-
-    override fun getUri(): Uri? = if (usingFallback) fallback.uri else uri
-
-    override fun close() {
-        uri = null
-        if (usingFallback) {
-            usingFallback = false
-            fallback.close()
-            return
-        }
-        try {
-            channel?.close()
-        } catch (_: IOException) {
-        } finally {
-            channel = null
-        }
-        try {
-            fis?.close()
-        } catch (_: IOException) {
-        } finally {
-            fis = null
-        }
-        try {
-            pfd?.close()
-        } catch (_: IOException) {
-        } finally {
-            pfd = null
-        }
-        if (opened) {
-            opened = false
-            transferEnded()
-        }
-    }
-
-    class Factory(private val context: Context) : DataSource.Factory {
-        override fun createDataSource(): DataSource = SeekSafeContentDataSource(context)
-    }
-}
 
 /**
  * Exact Material vector icons matching reference screenshot (1000063554.jpg)
@@ -806,6 +682,7 @@ class MainActivity : Activity(), SensorEventListener {
     private var vrOutputSurface: Surface? = null
     private var pendingMediaUri: Uri? = null
     private var activeMediaUri: Uri? = null
+    private var lastRequestedSeekMs: Long = -1L
     private var ioRetryCount = 0
 
     private lateinit var videoFrame: FrameLayout
@@ -1010,12 +887,9 @@ class MainActivity : Activity(), SensorEventListener {
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        // Use 64-bit FileChannel seek + CBR seek fallback so deep seeks (30+ mins) never fail
-        val dataSourceFactory = SeekSafeContentDataSource.Factory(this)
-        val extractorsFactory = DefaultExtractorsFactory()
-            .setConstantBitrateSeekingEnabled(true)
-            .setConstantBitrateSeekingAlwaysEnabled(true)
-        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory)
+        // Use stock DefaultDataSource + DefaultMediaSourceFactory so MP4 keyframe index seeking works reliably
+        val dataSourceFactory = DefaultDataSource.Factory(this)
+        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
         player = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
@@ -1038,6 +912,7 @@ class MainActivity : Activity(), SensorEventListener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) {
                     ioRetryCount = 0
+                    lastRequestedSeekMs = -1L
                     placeholder.visibility = View.GONE
                     val resolvedName = currentVideoName.ifBlank { "Now playing" }
                     titleView.text = resolvedName
@@ -1065,24 +940,26 @@ class MainActivity : Activity(), SensorEventListener {
 
             override fun onPlayerError(error: PlaybackException) {
                 val uri = activeMediaUri
-                if (uri != null &&
-                    ioRetryCount < 3 &&
-                    (error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
-                        error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ||
-                        error.errorCode == PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE)
-                ) {
+                if (uri != null && ioRetryCount < 3) {
                     ioRetryCount++
-                    val resumePosition = player.currentPosition.coerceAtLeast(0L)
+                    val targetPosition = if (lastRequestedSeekMs >= 0L) {
+                        lastRequestedSeekMs
+                    } else {
+                        player.currentPosition.coerceAtLeast(0L)
+                    }
                     mainHandler.postDelayed({
                         if (::player.isInitialized && activeMediaUri == uri) {
                             rebindActiveSurface()
                             player.stop()
                             player.clearMediaItems()
-                            player.setMediaItem(MediaItem.fromUri(uri), resumePosition)
+                            player.setMediaItem(MediaItem.fromUri(uri))
                             player.prepare()
+                            if (targetPosition > 0L) {
+                                player.seekTo(targetPosition)
+                            }
                             player.playWhenReady = true
                         }
-                    }, 120L)
+                    }, 100L)
                     return
                 }
 
@@ -1097,6 +974,13 @@ class MainActivity : Activity(), SensorEventListener {
             }
         })
         mainHandler.post(progressUpdater)
+    }
+
+    private fun performSafeSeek(targetMs: Long) {
+        val clamped = targetMs.coerceAtLeast(0L)
+        lastRequestedSeekMs = clamped
+        ioRetryCount = 0
+        player.seekTo(clamped)
     }
 
     private fun setPillLeftIcon(view: TextView, icon: PillIconDrawable, tintColor: Int) {
@@ -1301,11 +1185,11 @@ class MainActivity : Activity(), SensorEventListener {
         if (!isFullscreen) return
         val w = videoFrame.width.coerceAtLeast(1)
         if (x < w * 0.28f) {
-            player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L))
+            performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L))
             showCenterHud("↶  10s", 750L)
         } else if (x > w * 0.72f) {
             val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-            player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
+            performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
             showCenterHud("10s  ↷", 750L)
         }
     }
@@ -1433,7 +1317,7 @@ class MainActivity : Activity(), SensorEventListener {
                 override fun onStartTrackingTouch(bar: SeekBar?) {}
                 override fun onStopTrackingTouch(bar: SeekBar?) {
                     if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
-                        player.seekTo(player.currentPosition)
+                        performSafeSeek(player.currentPosition)
                     }
                 }
             })
@@ -1447,7 +1331,7 @@ class MainActivity : Activity(), SensorEventListener {
             audioValueText.text = formatOffsetLabel(clamped)
             prefs.edit().putInt(KEY_AUDIO_OFFSET_MS, clamped).apply()
             if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
-                player.seekTo(player.currentPosition)
+                performSafeSeek(player.currentPosition)
             }
         }
 
@@ -2031,7 +1915,7 @@ class MainActivity : Activity(), SensorEventListener {
             isClickable = true
             isFocusable = true
             contentDescription = "Rewind 10 seconds"
-            setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
+            setOnClickListener { performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
         }
         overlayPlayButton = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_XY
@@ -2045,7 +1929,7 @@ class MainActivity : Activity(), SensorEventListener {
             contentDescription = "Play or pause"
             setOnClickListener {
                 if (player.isPlaying) player.pause() else {
-                    if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
+                    if (player.playbackState == Player.STATE_ENDED) performSafeSeek(0L)
                     player.play()
                 }
             }
@@ -2058,7 +1942,7 @@ class MainActivity : Activity(), SensorEventListener {
             contentDescription = "Forward 10 seconds"
             setOnClickListener {
                 val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-                player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
+                performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
         fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(26), dp(22)).apply {
@@ -2100,7 +1984,7 @@ class MainActivity : Activity(), SensorEventListener {
             onStopScrub = { value ->
                 val d = player.duration
                 if (d != C.TIME_UNSET && d > 0L) {
-                    player.seekTo((value.toLong() * d) / 1000L)
+                    performSafeSeek((value.toLong() * d) / 1000L)
                 }
                 isScrubbing = false
                 mainHandler.removeCallbacks(hideCenterHudRunnable)
@@ -2279,7 +2163,7 @@ class MainActivity : Activity(), SensorEventListener {
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {
                     val duration = player.duration
                     if (duration != C.TIME_UNSET && duration > 0L) {
-                        player.seekTo((this@MainActivity.seekBar.progress / 1000f * duration).toLong())
+                        performSafeSeek((this@MainActivity.seekBar.progress / 1000f * duration).toLong())
                     }
                     isScrubbing = false
                 }
@@ -2310,13 +2194,13 @@ class MainActivity : Activity(), SensorEventListener {
             setOnClickListener { showSpeedPicker(this) }
         }
         val backButton = transportButton("↶ 10").apply {
-            setOnClickListener { player.seekTo((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
+            setOnClickListener { performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
         }
         playButton = transportButton("▶", true).apply {
             textSize = 20f
             setOnClickListener {
                 if (player.isPlaying) player.pause() else {
-                    if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
+                    if (player.playbackState == Player.STATE_ENDED) performSafeSeek(0L)
                     player.play()
                 }
             }
@@ -2324,7 +2208,7 @@ class MainActivity : Activity(), SensorEventListener {
         val forwardButton = transportButton("10 ↷").apply {
             setOnClickListener {
                 val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
-                player.seekTo((player.currentPosition + 10_000L).coerceAtMost(end))
+                performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
 
@@ -2501,6 +2385,7 @@ class MainActivity : Activity(), SensorEventListener {
 
     private fun startPlayback(uri: Uri) {
         activeMediaUri = uri
+        lastRequestedSeekMs = -1L
         ioRetryCount = 0
         lastRenderedFrames = 0
         lastFpsCheckTimeMs = 0L
