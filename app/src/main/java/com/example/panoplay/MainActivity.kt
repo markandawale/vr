@@ -14,6 +14,10 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.media.AudioManager
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -115,14 +119,12 @@ private class TransportIconDrawable(
                 canvas.drawRect(rect, paint)
             }
             Type.REWIND -> {
-                // Exact tall-proportioned Material fast-rewind triangles (matches reference 1000063562.jpg)
                 val halfH = h * 0.34f
                 val triW = halfH * 1.32f
                 val overlap = triW * 0.22f
                 val totalW = triW * 2f - overlap
                 val startX = cx - totalW * 0.5f
 
-                // Left triangle
                 val lTipX = startX
                 val lBaseX = lTipX + triW
                 path.reset()
@@ -132,7 +134,6 @@ private class TransportIconDrawable(
                 path.close()
                 canvas.drawPath(path, paint)
 
-                // Right triangle slightly overlapping the first
                 val rTipX = lBaseX - overlap
                 val rBaseX = rTipX + triW
                 path.reset()
@@ -143,14 +144,12 @@ private class TransportIconDrawable(
                 canvas.drawPath(path, paint)
             }
             Type.FORWARD -> {
-                // Exact tall-proportioned Material fast-forward triangles (matches reference 1000063562.jpg)
                 val halfH = h * 0.34f
                 val triW = halfH * 1.32f
                 val overlap = triW * 0.22f
                 val totalW = triW * 2f - overlap
                 val startX = cx - totalW * 0.5f
 
-                // Left triangle
                 val lBaseX = startX
                 val lTipX = lBaseX + triW
                 path.reset()
@@ -160,7 +159,6 @@ private class TransportIconDrawable(
                 path.close()
                 canvas.drawPath(path, paint)
 
-                // Right triangle slightly overlapping the first
                 val rBaseX = lTipX - overlap
                 val rTipX = rBaseX + triW
                 path.reset()
@@ -559,7 +557,7 @@ private class TwsAudioRenderer(
 }
 
 @OptIn(UnstableApi::class)
-class MainActivity : Activity() {
+class MainActivity : Activity(), SensorEventListener {
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
     private lateinit var vrSurfaceView: VrVideoSurfaceView
@@ -592,6 +590,7 @@ class MainActivity : Activity() {
     private lateinit var speedButton: TextView
     private lateinit var overlaySpeedButton: TextView
     private lateinit var overlayRecenterButton: TextView
+    private lateinit var overlayMotionButton: TextView
     private lateinit var overlayRotateButton: TextView
 
     private val playVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PLAY, Color.rgb(14, 16, 22)) }
@@ -607,6 +606,16 @@ class MainActivity : Activity() {
     private var lastFpsCheckTimeMs = 0L
     private var showFpsEnabled = false
     private var showModeBadgeEnabled = false
+
+    // Gyroscope Motion Tracking State
+    private var isMotionEnabled = false
+    private var lastGyroTimestampNs = 0L
+    private val sensorManager by lazy {
+        getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    }
+    private val gyroSensor: Sensor? by lazy {
+        sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    }
 
     @Volatile
     private var audioOffsetMs = 0
@@ -844,6 +853,80 @@ class MainActivity : Activity() {
         })
         mainHandler.post(progressUpdater)
     }
+
+    private fun setMotionTrackingEnabled(enabled: Boolean, showFeedback: Boolean = true) {
+        if (enabled && gyroSensor == null) {
+            Toast.makeText(this, "Gyroscope sensor not available on this device", Toast.LENGTH_SHORT).show()
+            return
+        }
+        isMotionEnabled = enabled
+        lastGyroTimestampNs = 0L
+        if (enabled) {
+            sensorManager.registerListener(this, gyroSensor, SensorManager.SENSOR_DELAY_GAME)
+        } else {
+            sensorManager.unregisterListener(this)
+        }
+        if (::overlayMotionButton.isInitialized) {
+            overlayMotionButton.background = rounded(
+                if (enabled) Color.rgb(122, 146, 255) else Color.argb(145, 28, 32, 42),
+                22
+            )
+            overlayMotionButton.setTextColor(if (enabled) Color.rgb(14, 16, 22) else Color.WHITE)
+        }
+        if (showFeedback) {
+            showCenterHud(if (enabled) "MOTION ON" else "MOTION OFF", 750L)
+        }
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (!isMotionEnabled || event == null || event.sensor.type != Sensor.TYPE_GYROSCOPE) return
+        if (currentProjection == VrVideoSurfaceView.Projection.FLAT) return
+
+        val ts = event.timestamp
+        if (lastGyroTimestampNs != 0L) {
+            val dtSec = (ts - lastGyroTimestampNs) * 1e-9f
+            if (dtSec > 0f && dtSec < 0.25f) {
+                val rotX = event.values[0] // device pitch rate (rad/s)
+                val rotY = event.values[1] // device yaw rate (rad/s)
+
+                @Suppress("DEPRECATION")
+                val displayRotation = windowManager.defaultDisplay?.rotation ?: Surface.ROTATION_0
+                val yawRateRad: Float
+                val pitchRateRad: Float
+                when (displayRotation) {
+                    Surface.ROTATION_90 -> {
+                        yawRateRad = -rotX
+                        pitchRateRad = rotY
+                    }
+                    Surface.ROTATION_270 -> {
+                        yawRateRad = rotX
+                        pitchRateRad = -rotY
+                    }
+                    Surface.ROTATION_180 -> {
+                        yawRateRad = -rotY
+                        pitchRateRad = -rotX
+                    }
+                    else -> {
+                        yawRateRad = rotY
+                        pitchRateRad = rotX
+                    }
+                }
+
+                // Deadzone tiny hand tremor (< 0.015 rad/s) so stationary frame stays rock steady
+                val filteredYaw = if (abs(yawRateRad) < 0.015f) 0f else yawRateRad
+                val filteredPitch = if (abs(pitchRateRad) < 0.015f) 0f else pitchRateRad
+
+                if (filteredYaw != 0f || filteredPitch != 0f) {
+                    val deltaYawDeg = -Math.toDegrees((filteredYaw * dtSec).toDouble()).toFloat() * 1.15f
+                    val deltaPitchDeg = Math.toDegrees((filteredPitch * dtSec).toDouble()).toFloat() * 1.15f
+                    vrSurfaceView.applyGyroDelta(deltaYawDeg, deltaPitchDeg)
+                }
+            }
+        }
+        lastGyroTimestampNs = ts
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     private fun rebindActiveSurface() {
         if (currentProjection == VrVideoSurfaceView.Projection.FLAT) {
@@ -1677,7 +1760,7 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP)
         )
 
-        // 2. Fullscreen Center Transport Row (Exact reference equilateral overlapping Rewind/Forward + centered Play/Pause)
+        // 2. Fullscreen Center Transport Row (Reduced spacing between Rewind, Play/Pause, and Forward)
         fullscreenCenterControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1721,11 +1804,11 @@ class MainActivity : Activity() {
             }
         }
         fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(26), dp(22)).apply {
-            rightMargin = dp(48)
+            rightMargin = dp(28)
         })
         fullscreenCenterControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(64), dp(64)))
         fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(26), dp(22)).apply {
-            leftMargin = dp(48)
+            leftMargin = dp(28)
         })
         videoFrame.addView(
             fullscreenCenterControls,
@@ -1787,23 +1870,23 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
-        // Bottom pills row below slider: Speed | Recenter | Landscape
+        // Bottom pills row below slider: Speed | Recenter | Motion | Landscape
         val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding(0, dp(10), 0, 0)
         }
-        overlaySpeedButton = text("1.0x", 12f, Color.WHITE, true).apply {
+        overlaySpeedButton = text("1.0x", 11.5f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(18), dp(9), dp(18), dp(9))
+            setPadding(dp(14), dp(8), dp(14), dp(8))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
             setOnClickListener { showSpeedPicker(this) }
         }
-        overlayRecenterButton = text("Recenter", 12f, Color.WHITE, true).apply {
+        overlayRecenterButton = text("Recenter", 11.5f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(18), dp(9), dp(18), dp(9))
+            setPadding(dp(14), dp(8), dp(14), dp(8))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
@@ -1814,21 +1897,32 @@ class MainActivity : Activity() {
                 }
             }
         }
-        overlayRotateButton = text("Landscape", 12f, Color.WHITE, true).apply {
+        overlayMotionButton = text("Motion", 11.5f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(18), dp(9), dp(18), dp(9))
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            background = rounded(Color.argb(145, 28, 32, 42), 22)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { setMotionTrackingEnabled(!isMotionEnabled) }
+        }
+        overlayRotateButton = text("Landscape", 11.5f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(8), dp(14), dp(8))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
             setOnClickListener { toggleFullscreenOrientation() }
         }
-        bottomPillsRow.addView(overlaySpeedButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            rightMargin = dp(10)
-        })
-        bottomPillsRow.addView(overlayRecenterButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            rightMargin = dp(10)
-        })
-        bottomPillsRow.addView(overlayRotateButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        val bottomPills = listOf(overlaySpeedButton, overlayRecenterButton, overlayMotionButton, overlayRotateButton)
+        bottomPills.forEachIndexed { idx, pill ->
+            bottomPillsRow.addView(
+                pill,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    if (idx < bottomPills.lastIndex) rightMargin = dp(7)
+                }
+            )
+        }
         fullscreenBottomControls.addView(
             bottomPillsRow,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -2209,6 +2303,9 @@ class MainActivity : Activity() {
             (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
             enterImmersiveMode()
         } else {
+            if (isMotionEnabled) {
+                setMotionTrackingEnabled(false, showFeedback = false)
+            }
             if (isFullscreenLandscape) {
                 isFullscreenLandscape = false
                 requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -2313,15 +2410,21 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (::vrSurfaceView.isInitialized) vrSurfaceView.onResume()
+        if (isMotionEnabled && gyroSensor != null) {
+            lastGyroTimestampNs = 0L
+            sensorManager.registerListener(this, gyroSensor, SensorManager.SENSOR_DELAY_GAME)
+        }
     }
 
     override fun onPause() {
+        sensorManager.unregisterListener(this)
         if (::vrSurfaceView.isInitialized) vrSurfaceView.onPause()
         if (::player.isInitialized) player.pause()
         super.onPause()
     }
 
     override fun onDestroy() {
+        sensorManager.unregisterListener(this)
         mainHandler.removeCallbacks(progressUpdater)
         mainHandler.removeCallbacks(hideCenterHudRunnable)
         if (::playerView.isInitialized) playerView.player = null
