@@ -210,10 +210,10 @@ private class MaterialIconDrawable(
     private val path = Path()
     private val oval = RectF()
 
-    fun setTint(color: Int) {
-        tintColor = color
-        fillPaint.color = color
-        strokePaint.color = color
+    override fun setTint(tintColor: Int) {
+        this.tintColor = tintColor
+        fillPaint.color = tintColor
+        strokePaint.color = tintColor
         invalidateSelf()
     }
 
