@@ -7,15 +7,19 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.res.ColorStateList
 import android.database.Cursor
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Outline
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -38,6 +42,7 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -80,6 +85,31 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
+
+/**
+ * Material 3 (Material You) Expressive Dark Theme Tokens
+ */
+private object M3Theme {
+    val surfaceBg = Color.rgb(12, 15, 22)              // #0C0F16 Deep Obsidian Surface
+    val surfaceContainer = Color.rgb(22, 27, 38)       // #161B26 Tonal Card Surface
+    val surfaceContainerHigh = Color.rgb(31, 38, 53)   // #1F2635 Elevated Pill / Button
+    val surfaceContainerHighest = Color.rgb(42, 51, 70)// #2A3346 Interactive Chip
+    val glassOverlay = Color.argb(185, 22, 27, 38)     // Translucent Fullscreen Pill
+
+    val primary = Color.rgb(168, 199, 250)             // #A8C7FA Material 3 Dynamic Periwinkle
+    val onPrimary = Color.rgb(6, 46, 111)              // #062E6F High-Contrast Ink on Primary
+    val secondaryContainer = Color.rgb(43, 66, 108)    // #2B426C Tonal Selected Segment
+    val onSecondaryContainer = Color.rgb(211, 227, 253)// #D3E3FD Text on Selected Segment
+
+    val onSurface = Color.rgb(232, 236, 244)           // #E8ECF4 Primary Text
+    val onSurfaceVariant = Color.rgb(156, 166, 184)    // #9CA6B8 Secondary / Subtitle Text
+    val outlineVariant = Color.argb(70, 142, 155, 180) // Subtle 1dp M3 Border
+    val rippleColor = Color.argb(45, 168, 199, 250)
+
+    val tertiaryGreen = Color.rgb(129, 230, 178)       // FPS & Metadata Accent
+    val errorContainer = Color.rgb(140, 29, 24)
+    val onError = Color.rgb(255, 180, 171)
+}
 
 /**
  * Resolves exact byte length from ContentResolver when ContentDataSource returns C.LENGTH_UNSET (-1),
@@ -155,15 +185,17 @@ private class SafeGuardDataSource(
 }
 
 /**
- * Exact Material vector icons matching reference screenshot
- * for Speedometer, Recenter Crosshair, and Motion Compass pills.
+ * Crisp Material 3 Vector Icons for Header, Pills, and Controls
  */
-private class PillIconDrawable(
+private class MaterialIconDrawable(
     private val iconType: Type,
-    private val tintColor: Int
+    private var tintColor: Int
 ) : Drawable() {
 
-    enum class Type { SPEED, RECENTER, MOTION }
+    enum class Type {
+        SPEED, RECENTER, MOTION, INFO, SETTINGS, FOLDER_OPEN,
+        FULLSCREEN, BACK_ARROW, ROTATE, VR_HEADSET
+    }
 
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = tintColor
@@ -173,9 +205,17 @@ private class PillIconDrawable(
         color = tintColor
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
     }
     private val path = Path()
     private val oval = RectF()
+
+    fun setTint(color: Int) {
+        tintColor = color
+        fillPaint.color = color
+        strokePaint.color = color
+        invalidateSelf()
+    }
 
     override fun draw(canvas: Canvas) {
         val w = bounds.width().toFloat()
@@ -190,13 +230,12 @@ private class PillIconDrawable(
 
         when (iconType) {
             Type.RECENTER -> {
-                strokePaint.strokeWidth = s * 0.11f
-                val r = s * 0.30f
+                strokePaint.strokeWidth = s * 0.10f
+                val r = s * 0.29f
                 canvas.drawCircle(cx, cy, r, strokePaint)
-                canvas.drawCircle(cx, cy, s * 0.11f, fillPaint)
-
+                canvas.drawCircle(cx, cy, s * 0.10f, fillPaint)
                 val tickStart = r + s * 0.02f
-                val tickEnd = s * 0.46f
+                val tickEnd = s * 0.45f
                 canvas.drawLine(cx, cy - tickStart, cx, cy - tickEnd, strokePaint)
                 canvas.drawLine(cx, cy + tickStart, cx, cy + tickEnd, strokePaint)
                 canvas.drawLine(cx - tickStart, cy, cx - tickEnd, cy, strokePaint)
@@ -207,26 +246,15 @@ private class PillIconDrawable(
                 path.reset()
                 path.fillType = Path.FillType.EVEN_ODD
                 path.addCircle(cx, cy, r, Path.Direction.CW)
-
                 val tipDist = r * 0.64f
                 val sideDist = r * 0.23f
                 val diag = 0.7071f
-                val neX = cx + tipDist * diag
-                val neY = cy - tipDist * diag
-                val swX = cx - tipDist * diag
-                val swY = cy + tipDist * diag
-                val nwX = cx - sideDist * diag
-                val nwY = cy - sideDist * diag
-                val seX = cx + sideDist * diag
-                val seY = cy + sideDist * diag
-
-                path.moveTo(neX, neY)
-                path.lineTo(seX, seY)
-                path.lineTo(swX, swY)
-                path.lineTo(nwX, nwY)
+                path.moveTo(cx + tipDist * diag, cy - tipDist * diag)
+                path.lineTo(cx + sideDist * diag, cy + sideDist * diag)
+                path.lineTo(cx - tipDist * diag, cy + tipDist * diag)
+                path.lineTo(cx - sideDist * diag, cy - sideDist * diag)
                 path.close()
                 canvas.drawPath(path, fillPaint)
-
                 canvas.drawCircle(cx, cy, r * 0.11f, fillPaint)
             }
             Type.SPEED -> {
@@ -238,22 +266,81 @@ private class PillIconDrawable(
 
                 path.reset()
                 path.fillType = Path.FillType.EVEN_ODD
-                val innerR = s * 0.25f
+                val innerR = s * 0.24f
                 oval.set(cx - innerR, gaugeCy - innerR, cx + innerR, gaugeCy + innerR)
                 path.addArc(oval, 180f, 180f)
-                path.lineTo(cx + innerR, gaugeCy + s * 0.06f)
-                path.lineTo(cx - innerR, gaugeCy + s * 0.06f)
+                path.lineTo(cx + innerR, gaugeCy + s * 0.05f)
+                path.lineTo(cx - innerR, gaugeCy + s * 0.05f)
                 path.close()
                 canvas.drawPath(path, fillPaint)
 
-                strokePaint.strokeWidth = s * 0.11f
-                canvas.drawLine(
-                    cx - s * 0.03f,
-                    gaugeCy - s * 0.02f,
-                    cx + s * 0.23f,
-                    gaugeCy - s * 0.28f,
-                    strokePaint
-                )
+                strokePaint.strokeWidth = s * 0.10f
+                canvas.drawLine(cx - s * 0.02f, gaugeCy - s * 0.02f, cx + s * 0.22f, gaugeCy - s * 0.27f, strokePaint)
+            }
+            Type.INFO -> {
+                strokePaint.strokeWidth = s * 0.095f
+                canvas.drawCircle(cx, cy, s * 0.39f, strokePaint)
+                canvas.drawCircle(cx, cy - s * 0.17f, s * 0.055f, fillPaint)
+                canvas.drawLine(cx, cy - s * 0.03f, cx, cy + s * 0.20f, strokePaint)
+            }
+            Type.SETTINGS -> {
+                strokePaint.strokeWidth = s * 0.095f
+                canvas.drawCircle(cx, cy, s * 0.16f, strokePaint)
+                val rIn = s * 0.26f
+                val rOut = s * 0.39f
+                for (i in 0 until 8) {
+                    val angle = Math.toRadians(i * 45.0)
+                    val cosA = kotlin.math.cos(angle).toFloat()
+                    val sinA = kotlin.math.sin(angle).toFloat()
+                    canvas.drawLine(cx + rIn * cosA, cy + rIn * sinA, cx + rOut * cosA, cy + rOut * sinA, strokePaint)
+                }
+            }
+            Type.FOLDER_OPEN -> {
+                strokePaint.strokeWidth = s * 0.095f
+                path.reset()
+                path.moveTo(w * 0.14f, h * 0.28f)
+                path.lineTo(w * 0.40f, h * 0.28f)
+                path.lineTo(w * 0.48f, h * 0.37f)
+                path.lineTo(w * 0.86f, h * 0.37f)
+                path.lineTo(w * 0.86f, h * 0.76f)
+                path.lineTo(w * 0.14f, h * 0.76f)
+                path.close()
+                canvas.drawPath(path, strokePaint)
+            }
+            Type.FULLSCREEN -> {
+                strokePaint.strokeWidth = s * 0.10f
+                val p = s * 0.20f
+                val l = s * 0.22f
+                // Top-left
+                canvas.drawLine(p, p + l, p, p, strokePaint)
+                canvas.drawLine(p, p, p + l, p, strokePaint)
+                // Top-right
+                canvas.drawLine(w - p - l, p, w - p, p, strokePaint)
+                canvas.drawLine(w - p, p, w - p, p + l, strokePaint)
+                // Bottom-left
+                canvas.drawLine(p, h - p - l, p, h - p, strokePaint)
+                canvas.drawLine(p, h - p, p + l, h - p, strokePaint)
+                // Bottom-right
+                canvas.drawLine(w - p - l, h - p, w - p, h - p, strokePaint)
+                canvas.drawLine(w - p, h - p - l, w - p, h - p, strokePaint)
+            }
+            Type.BACK_ARROW -> {
+                strokePaint.strokeWidth = s * 0.105f
+                canvas.drawLine(w * 0.24f, cy, w * 0.78f, cy, strokePaint)
+                canvas.drawLine(w * 0.46f, h * 0.28f, w * 0.24f, cy, strokePaint)
+                canvas.drawLine(w * 0.46f, h * 0.72f, w * 0.24f, cy, strokePaint)
+            }
+            Type.ROTATE -> {
+                strokePaint.strokeWidth = s * 0.095f
+                oval.set(w * 0.22f, h * 0.28f, w * 0.78f, h * 0.72f)
+                canvas.drawRoundRect(oval, s * 0.08f, s * 0.08f, strokePaint)
+            }
+            Type.VR_HEADSET -> {
+                strokePaint.strokeWidth = s * 0.09f
+                oval.set(w * 0.14f, h * 0.28f, w * 0.86f, h * 0.72f)
+                canvas.drawRoundRect(oval, s * 0.14f, s * 0.14f, strokePaint)
+                canvas.drawCircle(w * 0.34f, cy, s * 0.09f, strokePaint)
+                canvas.drawCircle(w * 0.66f, cy, s * 0.09f, strokePaint)
             }
         }
     }
@@ -273,7 +360,7 @@ private class PillIconDrawable(
 }
 
 /**
- * Exact Material / Google Files vector icons for Play, Pause, Rewind, and Forward.
+ * Material 3 Transport Icons for Play, Pause, Rewind, and Forward.
  */
 private class TransportIconDrawable(
     private val iconType: Type,
@@ -298,9 +385,9 @@ private class TransportIconDrawable(
 
         when (iconType) {
             Type.PLAY -> {
-                val halfH = h * 0.145f
-                val leftX = cx - w * 0.095f
-                val rightX = cx + w * 0.155f
+                val halfH = h * 0.22f
+                val leftX = cx - w * 0.13f
+                val rightX = cx + w * 0.21f
                 path.reset()
                 path.moveTo(leftX, cy - halfH)
                 path.lineTo(rightX, cy)
@@ -309,62 +396,54 @@ private class TransportIconDrawable(
                 canvas.drawPath(path, paint)
             }
             Type.PAUSE -> {
-                val barW = w * 0.056f
-                val halfH = h * 0.14f
-                val gap = w * 0.044f
-
+                val barW = w * 0.085f
+                val halfH = h * 0.21f
+                val gap = w * 0.065f
                 rect.set(cx - gap - barW, cy - halfH, cx - gap, cy + halfH)
-                canvas.drawRect(rect, paint)
-
+                canvas.drawRoundRect(rect, barW * 0.4f, barW * 0.4f, paint)
                 rect.set(cx + gap, cy - halfH, cx + gap + barW, cy + halfH)
-                canvas.drawRect(rect, paint)
+                canvas.drawRoundRect(rect, barW * 0.4f, barW * 0.4f, paint)
             }
             Type.REWIND -> {
-                val halfH = h * 0.34f
-                val triW = halfH * 1.32f
-                val overlap = triW * 0.22f
+                val halfH = h * 0.30f
+                val triW = halfH * 1.25f
+                val overlap = triW * 0.20f
                 val totalW = triW * 2f - overlap
                 val startX = cx - totalW * 0.5f
 
-                val lTipX = startX
-                val lBaseX = lTipX + triW
                 path.reset()
-                path.moveTo(lTipX, cy)
-                path.lineTo(lBaseX, cy - halfH)
-                path.lineTo(lBaseX, cy + halfH)
+                path.moveTo(startX, cy)
+                path.lineTo(startX + triW, cy - halfH)
+                path.lineTo(startX + triW, cy + halfH)
                 path.close()
                 canvas.drawPath(path, paint)
 
-                val rTipX = lBaseX - overlap
-                val rBaseX = rTipX + triW
+                val rTipX = startX + triW - overlap
                 path.reset()
                 path.moveTo(rTipX, cy)
-                path.lineTo(rBaseX, cy - halfH)
-                path.lineTo(rBaseX, cy + halfH)
+                path.lineTo(rTipX + triW, cy - halfH)
+                path.lineTo(rTipX + triW, cy + halfH)
                 path.close()
                 canvas.drawPath(path, paint)
             }
             Type.FORWARD -> {
-                val halfH = h * 0.34f
-                val triW = halfH * 1.32f
-                val overlap = triW * 0.22f
+                val halfH = h * 0.30f
+                val triW = halfH * 1.25f
+                val overlap = triW * 0.20f
                 val totalW = triW * 2f - overlap
                 val startX = cx - totalW * 0.5f
 
-                val lBaseX = startX
-                val lTipX = lBaseX + triW
                 path.reset()
-                path.moveTo(lBaseX, cy - halfH)
-                path.lineTo(lTipX, cy)
-                path.lineTo(lBaseX, cy + halfH)
+                path.moveTo(startX, cy - halfH)
+                path.lineTo(startX + triW, cy)
+                path.lineTo(startX, cy + halfH)
                 path.close()
                 canvas.drawPath(path, paint)
 
-                val rBaseX = lTipX - overlap
-                val rTipX = rBaseX + triW
+                val rBaseX = startX + triW - overlap
                 path.reset()
                 path.moveTo(rBaseX, cy - halfH)
-                path.lineTo(rTipX, cy)
+                path.lineTo(rBaseX + triW, cy)
                 path.lineTo(rBaseX, cy + halfH)
                 path.close()
                 canvas.drawPath(path, paint)
@@ -385,9 +464,9 @@ private class TransportIconDrawable(
 }
 
 /**
- * Custom sleek cinema-style seek slider for fullscreen mode.
+ * Material 3 Expressive Seek Slider with Tonal Track & Pill Handle
  */
-private class CinemaSeekBar(context: Context) : View(context) {
+private class MaterialSeekSlider(context: Context) : View(context) {
     var max: Int = 1000
     var progress: Int = 0
         set(value) {
@@ -406,23 +485,24 @@ private class CinemaSeekBar(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
 
     private val trackBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(85, 255, 255, 255)
+        color = Color.argb(95, 168, 199, 250)
         style = Paint.Style.FILL
     }
     private val trackFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(122, 146, 255)
+        color = M3Theme.primary
         style = Paint.Style.FILL
     }
-    private val thumbGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(80, 122, 146, 255)
+    private val thumbHaloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(65, 168, 199, 250)
         style = Paint.Style.FILL
     }
-    private val thumbCorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(122, 146, 255)
+    private val thumbPillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = M3Theme.primary
         style = Paint.Style.FILL
     }
     private val trackRect = RectF()
     private val fillRect = RectF()
+    private val thumbRect = RectF()
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -430,32 +510,41 @@ private class CinemaSeekBar(context: Context) : View(context) {
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
 
-        val sidePad = 6.5f * density
+        val sidePad = 8f * density
         val usableWidth = (w - sidePad * 2f).coerceAtLeast(1f)
         val centerY = h * 0.5f
 
-        val trackHeight = (if (isDragging) 6f else 3.5f) * density
+        val trackHeight = (if (isDragging) 7f else 4.5f) * density
         val halfTrack = trackHeight * 0.5f
-        val radius = halfTrack
-
         val fraction = if (max > 0) (progress.toFloat() / max.toFloat()).coerceIn(0f, 1f) else 0f
         val thumbX = sidePad + usableWidth * fraction
+        val gap = 5f * density
 
-        trackRect.set(sidePad, centerY - halfTrack, w - sidePad, centerY + halfTrack)
-        canvas.drawRoundRect(trackRect, radius, radius, trackBgPaint)
+        // Active track (Left of handle)
+        if (thumbX - gap > sidePad) {
+            fillRect.set(sidePad, centerY - halfTrack, thumbX - gap, centerY + halfTrack)
+            canvas.drawRoundRect(fillRect, halfTrack, halfTrack, trackFillPaint)
+        }
 
-        fillRect.set(sidePad, centerY - halfTrack, thumbX, centerY + halfTrack)
-        canvas.drawRoundRect(fillRect, radius, radius, trackFillPaint)
+        // Inactive track (Right of handle)
+        if (w - sidePad > thumbX + gap) {
+            trackRect.set(thumbX + gap, centerY - halfTrack, w - sidePad, centerY + halfTrack)
+            canvas.drawRoundRect(trackRect, halfTrack, halfTrack, trackBgPaint)
+        }
 
         if (isDragging) {
-            canvas.drawCircle(thumbX, centerY, 13f * density, thumbGlowPaint)
+            canvas.drawCircle(thumbX, centerY, 15f * density, thumbHaloPaint)
         }
-        val thumbRadius = (if (isDragging) 8.5f else 6.5f) * density
-        canvas.drawCircle(thumbX, centerY, thumbRadius, thumbCorePaint)
+
+        // Material 3 vertical pill handle
+        val pillHalfW = (if (isDragging) 3.2f else 2.4f) * density
+        val pillHalfH = (if (isDragging) 11f else 8.5f) * density
+        thumbRect.set(thumbX - pillHalfW, centerY - pillHalfH, thumbX + pillHalfW, centerY + pillHalfH)
+        canvas.drawRoundRect(thumbRect, pillHalfW, pillHalfW, thumbPillPaint)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        val sidePad = 6.5f * density
+        val sidePad = 8f * density
         val usableWidth = (width - sidePad * 2f).coerceAtLeast(1f)
 
         fun computeProgress(rawX: Float): Int {
@@ -687,22 +776,23 @@ class MainActivity : Activity(), SensorEventListener {
     private var lastErrorTimeMs = 0L
 
     private lateinit var videoFrame: FrameLayout
+    private lateinit var videoCardWrapper: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var centerHud: TextView
     private lateinit var fpsBadge: TextView
     private lateinit var titleView: TextView
-    private lateinit var playButton: TextView
-    private lateinit var seekBar: SeekBar
+    private lateinit var playButton: ImageView
+    private lateinit var seekBar: MaterialSeekSlider
     private lateinit var currentTimeView: TextView
     private lateinit var durationView: TextView
-    private lateinit var fullscreenButton: TextView
+    private lateinit var fullscreenButton: ImageView
 
     // Fullscreen Controls
     private lateinit var fullscreenTopBar: LinearLayout
     private lateinit var fullscreenCenterControls: LinearLayout
     private lateinit var fullscreenBottomControls: LinearLayout
     private lateinit var overlayPlayButton: ImageView
-    private lateinit var overlaySeekBar: CinemaSeekBar
+    private lateinit var overlaySeekBar: MaterialSeekSlider
     private lateinit var fullscreenTitleView: TextView
     private lateinit var fullscreenCurrentTime: TextView
     private lateinit var fullscreenDuration: TextView
@@ -713,14 +803,15 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var overlayMotionButton: TextView
     private lateinit var overlayRotateButton: TextView
 
-    private val playVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PLAY, Color.rgb(14, 16, 22)) }
-    private val pauseVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PAUSE, Color.rgb(14, 16, 22)) }
+    private val playVectorDark by lazy { TransportIconDrawable(TransportIconDrawable.Type.PLAY, M3Theme.onPrimary) }
+    private val pauseVectorDark by lazy { TransportIconDrawable(TransportIconDrawable.Type.PAUSE, M3Theme.onPrimary) }
+    private val overlayPlayVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PLAY, M3Theme.onPrimary) }
+    private val overlayPauseVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PAUSE, M3Theme.onPrimary) }
 
     private val fullscreenChrome = mutableListOf<View>()
     private var isFullscreen = false
     private var fullscreenControlsVisible = true
     private var normalRootPadding = intArrayOf(0, 0, 0, 0)
-    private var normalVideoMargins = intArrayOf(0, 0)
     private var currentBrightness = -1f
     private var lastRenderedBrightnessPercent = -1
     private var lastRenderedFrames = 0
@@ -764,7 +855,6 @@ class MainActivity : Activity(), SensorEventListener {
                 val position = player.currentPosition.coerceAtLeast(0L)
                 val progressPermille = if (duration > 0L) ((position * 1000L) / duration).toInt() else 0
                 if (!isScrubbing) {
-                    seekBar.max = 1000
                     seekBar.progress = progressPermille
                     currentTimeView.text = formatTime(position)
                 }
@@ -852,8 +942,8 @@ class MainActivity : Activity(), SensorEventListener {
 
         window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window.statusBarColor = Color.rgb(9, 10, 13)
-        window.navigationBarColor = Color.rgb(9, 10, 13)
+        window.statusBarColor = M3Theme.surfaceBg
+        window.navigationBarColor = M3Theme.surfaceBg
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
@@ -891,10 +981,10 @@ class MainActivity : Activity(), SensorEventListener {
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                /* minBufferMs = */ 15_000,
-                /* maxBufferMs = */ 50_000,
-                /* bufferForPlaybackMs = */ 1_500,
-                /* bufferForPlaybackAfterRebufferMs = */ 3_000
+                15_000,
+                50_000,
+                1_500,
+                3_000
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
@@ -911,9 +1001,9 @@ class MainActivity : Activity(), SensorEventListener {
 
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                playButton.text = if (isPlaying) "Ⅱ" else "▶"
+                playButton.setImageDrawable(if (isPlaying) pauseVectorDark else playVectorDark)
                 if (::overlayPlayButton.isInitialized) {
-                    overlayPlayButton.setImageDrawable(if (isPlaying) pauseVector else playVector)
+                    overlayPlayButton.setImageDrawable(if (isPlaying) overlayPauseVector else overlayPlayVector)
                 }
                 if (!isPlaying && ::fpsBadge.isInitialized) {
                     fpsBadge.text = "-- FPS"
@@ -930,9 +1020,9 @@ class MainActivity : Activity(), SensorEventListener {
                     if (::fullscreenTitleView.isInitialized) fullscreenTitleView.text = resolvedName
                 }
                 if (playbackState == Player.STATE_ENDED) {
-                    playButton.text = "▶"
+                    playButton.setImageDrawable(playVectorDark)
                     if (::overlayPlayButton.isInitialized) {
-                        overlayPlayButton.setImageDrawable(playVector)
+                        overlayPlayButton.setImageDrawable(overlayPlayVector)
                     }
                     if (::fpsBadge.isInitialized) fpsBadge.text = "-- FPS"
                 }
@@ -1037,30 +1127,29 @@ class MainActivity : Activity(), SensorEventListener {
 
         val outer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(16), dp(18), dp(14))
-            background = rounded(Color.rgb(20, 23, 29), 18)
+            setPadding(dp(22), dp(20), dp(22), dp(18))
+            background = m3Card(M3Theme.surfaceContainer, 28, M3Theme.outlineVariant)
         }
 
-        val title = text("PLAYBACK ERROR LOG", 14f, Color.rgb(255, 79, 94), true).apply {
-            letterSpacing = 0.06f
-            setPadding(0, 0, 0, dp(10))
+        val title = text("Playback Error Log", 17f, M3Theme.onError, true).apply {
+            setPadding(0, 0, 0, dp(12))
         }
         outer.addView(title)
 
         val scrollView = ScrollView(this).apply {
             isVerticalScrollBarEnabled = true
-            background = rounded(Color.rgb(13, 15, 20), 12)
-            setPadding(dp(10), dp(10), dp(10), dp(10))
+            background = m3Rounded(M3Theme.surfaceBg, 16)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
         }
         val logText = TextView(this).apply {
             text = summary
             textSize = 10.5f
-            setTextColor(Color.rgb(230, 234, 242))
+            setTextColor(M3Theme.onSurface)
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
         }
         scrollView.addView(logText)
-        val maxScrollHeight = (resources.displayMetrics.heightPixels * 0.52f).toInt()
+        val maxScrollHeight = (resources.displayMetrics.heightPixels * 0.50f).toInt()
         outer.addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxScrollHeight))
 
         val dialog = AlertDialog.Builder(this)
@@ -1071,22 +1160,22 @@ class MainActivity : Activity(), SensorEventListener {
         val btnRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
-        val copyBtn = pillButton("COPY ERROR", false).apply {
+        val copyBtn = m3TonalButton("Copy Error").apply {
             setOnClickListener {
                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText("PanoPlay Error", summary))
                 Toast.makeText(this@MainActivity, "Full error log copied", Toast.LENGTH_SHORT).show()
             }
         }
-        val closeBtn = pillButton("CLOSE", true).apply {
+        val closeBtn = m3FilledButton("Close").apply {
             setOnClickListener { dialog.dismiss() }
         }
-        btnRow.addView(copyBtn, LinearLayout.LayoutParams(0, dp(40), 1f).apply { rightMargin = dp(8) })
-        btnRow.addView(closeBtn, LinearLayout.LayoutParams(0, dp(40), 1f))
+        btnRow.addView(copyBtn, LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(10) })
+        btnRow.addView(closeBtn, LinearLayout.LayoutParams(0, dp(44), 1f))
         outer.addView(
             btnRow,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(12)
+                topMargin = dp(16)
             }
         )
 
@@ -1110,7 +1199,7 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     private fun setPillLeftIcon(view: TextView, icon: Drawable, tintColor: Int) {
-        icon.setColorFilter(tintColor, android.graphics.PorterDuff.Mode.SRC_IN)
+        icon.setColorFilter(tintColor, PorterDuff.Mode.SRC_IN)
         val iconSize = dp(17)
         icon.setBounds(0, 0, iconSize, iconSize)
         view.compoundDrawablePadding = dp(7)
@@ -1130,15 +1219,15 @@ class MainActivity : Activity(), SensorEventListener {
             sensorManager.unregisterListener(this)
         }
         if (::overlayMotionButton.isInitialized) {
-            val textColor = if (enabled) Color.rgb(14, 16, 22) else Color.WHITE
-            overlayMotionButton.background = rounded(
-                if (enabled) Color.rgb(122, 146, 255) else Color.argb(145, 28, 32, 42),
+            val textColor = if (enabled) M3Theme.onPrimary else M3Theme.onSurface
+            overlayMotionButton.background = m3RipplePill(
+                if (enabled) M3Theme.primary else M3Theme.glassOverlay,
                 22
             )
             overlayMotionButton.setTextColor(textColor)
             setPillLeftIcon(
                 overlayMotionButton,
-                PillIconDrawable(PillIconDrawable.Type.MOTION, textColor),
+                MaterialIconDrawable(MaterialIconDrawable.Type.MOTION, textColor),
                 textColor
             )
         }
@@ -1257,7 +1346,7 @@ class MainActivity : Activity(), SensorEventListener {
         lp.screenBrightness = clamped
         window.attributes = lp
 
-        showCenterHud("☀  $percent%")
+        showCenterHud("Brightness  $percent%")
     }
 
     private fun formatSpeedLabel(speed: Float): String =
@@ -1277,7 +1366,7 @@ class MainActivity : Activity(), SensorEventListener {
             val label = formatSpeedLabel(selected)
             speedButton.text = label
             if (::overlaySpeedButton.isInitialized) overlaySpeedButton.text = label
-            showCenterHud(label, 800L)
+            showCenterHud("Speed  $label", 800L)
             true
         }
         popup.show()
@@ -1319,13 +1408,12 @@ class MainActivity : Activity(), SensorEventListener {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(18), dp(22), dp(16))
-            background = rounded(Color.rgb(20, 23, 29), 18)
+            setPadding(dp(24), dp(22), dp(24), dp(20))
+            background = m3Card(M3Theme.surfaceContainer, 28, M3Theme.outlineVariant)
         }
 
-        val dialogTitle = text("PLAYER SETTINGS", 14f, Color.WHITE, true).apply {
-            letterSpacing = 0.06f
-            setPadding(0, 0, 0, dp(14))
+        val dialogTitle = text("Player Settings", 18f, M3Theme.onSurface, true).apply {
+            setPadding(0, 0, 0, dp(16))
         }
         container.addView(dialogTitle)
 
@@ -1333,14 +1421,14 @@ class MainActivity : Activity(), SensorEventListener {
         val fpsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = rounded(Color.rgb(28, 31, 38), 14)
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = m3Rounded(M3Theme.surfaceContainerHigh, 18)
         }
         val fpsTextCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
-        val fpsLabel = text("Show Live FPS", 13f, Color.WHITE, true)
-        val fpsSub = text("Display real-time frame rate on top-right", 10f, Color.rgb(152, 158, 170), false).apply {
+        val fpsLabel = text("Live Frame Rate", 14f, M3Theme.onSurface, true)
+        val fpsSub = text("Show real-time FPS pill in top-right", 11.5f, M3Theme.onSurfaceVariant, false).apply {
             setPadding(0, dp(3), 0, 0)
         }
         fpsTextCol.addView(fpsLabel)
@@ -1349,6 +1437,8 @@ class MainActivity : Activity(), SensorEventListener {
 
         val fpsSwitch = Switch(this).apply {
             isChecked = showFpsEnabled
+            thumbTintList = ColorStateList.valueOf(M3Theme.primary)
+            trackTintList = ColorStateList.valueOf(M3Theme.secondaryContainer)
             setOnCheckedChangeListener { _, isChecked ->
                 showFpsEnabled = isChecked
                 prefs.edit().putBoolean(KEY_SHOW_FPS, isChecked).apply()
@@ -1362,14 +1452,14 @@ class MainActivity : Activity(), SensorEventListener {
         val modeBadgeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = rounded(Color.rgb(28, 31, 38), 14)
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = m3Rounded(M3Theme.surfaceContainerHigh, 18)
         }
         val modeBadgeTextCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
-        val modeBadgeLabel = text("Show View Mode Badge", 13f, Color.WHITE, true)
-        val modeBadgeSub = text("Display 180° / 360° & Eye label on top-left", 10f, Color.rgb(152, 158, 170), false).apply {
+        val modeBadgeLabel = text("Projection Badge", 14f, M3Theme.onSurface, true)
+        val modeBadgeSub = text("Show 180° / 360° & Eye badge in top-left", 11.5f, M3Theme.onSurfaceVariant, false).apply {
             setPadding(0, dp(3), 0, 0)
         }
         modeBadgeTextCol.addView(modeBadgeLabel)
@@ -1378,6 +1468,8 @@ class MainActivity : Activity(), SensorEventListener {
 
         val modeBadgeSwitch = Switch(this).apply {
             isChecked = showModeBadgeEnabled
+            thumbTintList = ColorStateList.valueOf(M3Theme.primary)
+            trackTintList = ColorStateList.valueOf(M3Theme.secondaryContainer)
             setOnCheckedChangeListener { _, isChecked ->
                 showModeBadgeEnabled = isChecked
                 prefs.edit().putBoolean(KEY_SHOW_MODE_BADGE, isChecked).apply()
@@ -1392,34 +1484,34 @@ class MainActivity : Activity(), SensorEventListener {
             }
         )
 
-        // 3. Free-Range 1ms Precision Audio Sync Offset (-1000ms to +1000ms)
+        // 3. Audio Sync Offset Card
         val audioCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = rounded(Color.rgb(28, 31, 38), 14)
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = m3Rounded(M3Theme.surfaceContainerHigh, 18)
         }
         val audioHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val audioTitle = text("Audio Sync Offset", 13f, Color.WHITE, true)
-        val audioValueText = text(formatOffsetLabel(audioOffsetMs), 12f, Color.rgb(255, 79, 94), true).apply {
+        val audioTitle = text("Audio Sync Offset", 14f, M3Theme.onSurface, true)
+        val audioValueText = text(formatOffsetLabel(audioOffsetMs), 13f, M3Theme.primary, true).apply {
             gravity = Gravity.END
         }
         audioHeader.addView(audioTitle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         audioHeader.addView(audioValueText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         audioCard.addView(audioHeader)
 
-        val audioHint = text("Use +ms if audio plays before video  •  -ms if audio is late", 10f, Color.rgb(152, 158, 170), false).apply {
-            setPadding(0, dp(3), 0, dp(8))
+        val audioHint = text("+ms if audio is early  •  -ms if audio is late", 11f, M3Theme.onSurfaceVariant, false).apply {
+            setPadding(0, dp(3), 0, dp(10))
         }
         audioCard.addView(audioHint)
 
         val audioSeekBar = SeekBar(this).apply {
             max = 2000
             progress = (audioOffsetMs + 1000).coerceIn(0, 2000)
-            progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(255, 79, 94))
-            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            progressTintList = ColorStateList.valueOf(M3Theme.primary)
+            thumbTintList = ColorStateList.valueOf(M3Theme.primary)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
                     val newOffset = value - 1000
@@ -1437,7 +1529,7 @@ class MainActivity : Activity(), SensorEventListener {
                 }
             })
         }
-        audioCard.addView(audioSeekBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30)))
+        audioCard.addView(audioSeekBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32)))
 
         fun applyExactOffset(targetMs: Int) {
             val clamped = targetMs.coerceIn(-1000, 1000)
@@ -1450,10 +1542,10 @@ class MainActivity : Activity(), SensorEventListener {
             }
         }
 
-        fun stepChip(label: String, deltaMs: Int): TextView = text(label, 10f, Color.WHITE, true).apply {
+        fun stepChip(label: String, deltaMs: Int): TextView = text(label, 11f, M3Theme.onSurface, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(8), dp(6), dp(8), dp(6))
-            background = rounded(Color.rgb(42, 46, 56), 9)
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            background = m3RipplePill(M3Theme.surfaceContainerHighest, 12)
             setOnClickListener { applyExactOffset(audioOffsetMs + deltaMs) }
         }
 
@@ -1463,10 +1555,10 @@ class MainActivity : Activity(), SensorEventListener {
         }
         val minus5 = stepChip("-5ms", -5)
         val minus1 = stepChip("-1ms", -1)
-        val resetBtn = text("RESET", 10f, Color.rgb(255, 79, 94), true).apply {
+        val resetBtn = text("Reset", 11f, M3Theme.onSecondaryContainer, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            background = rounded(Color.rgb(42, 46, 56), 9)
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            background = m3RipplePill(M3Theme.secondaryContainer, 12)
             setOnClickListener { applyExactOffset(0) }
         }
         val plus1 = stepChip("+1ms", 1)
@@ -1477,14 +1569,14 @@ class MainActivity : Activity(), SensorEventListener {
             fineTuneRow.addView(
                 chip,
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    if (idx > 0) leftMargin = dp(4)
+                    if (idx > 0) leftMargin = dp(5)
                 }
             )
         }
         audioCard.addView(
             fineTuneRow,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(6)
+                topMargin = dp(8)
             }
         )
 
@@ -1500,13 +1592,13 @@ class MainActivity : Activity(), SensorEventListener {
             .create()
         dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
 
-        val closeBtn = pillButton("DONE", true).apply {
+        val closeBtn = m3FilledButton("Done").apply {
             setOnClickListener { dialog.dismiss() }
         }
         container.addView(
             closeBtn,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)).apply {
-                topMargin = dp(16)
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply {
+                topMargin = dp(18)
             }
         )
 
@@ -1683,17 +1775,15 @@ class MainActivity : Activity(), SensorEventListener {
     private fun showMetadataDialog(fileName: String, rows: List<Pair<String, String?>>) {
         val outer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(18), dp(20), dp(14))
-            background = rounded(Color.rgb(20, 23, 29), 18)
+            setPadding(dp(22), dp(20), dp(22), dp(18))
+            background = m3Card(M3Theme.surfaceContainer, 28, M3Theme.outlineVariant)
         }
 
-        val headerTitle = text("VIDEO METADATA", 14f, Color.WHITE, true).apply {
-            letterSpacing = 0.06f
-        }
-        val fileLabel = text(fileName, 11f, Color.rgb(255, 79, 94), true).apply {
+        val headerTitle = text("Media Specifications", 18f, M3Theme.onSurface, true)
+        val fileLabel = text(fileName, 12f, M3Theme.primary, true).apply {
             maxLines = 2
             ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-            setPadding(0, dp(4), 0, dp(12))
+            setPadding(0, dp(4), 0, dp(14))
         }
         outer.addView(headerTitle)
         outer.addView(fileLabel)
@@ -1707,20 +1797,20 @@ class MainActivity : Activity(), SensorEventListener {
 
         rows.forEach { (key, value) ->
             if (value == null) {
-                val sectionHeader = text(key, 10f, Color.rgb(120, 235, 165), true).apply {
+                val sectionHeader = text(key, 10.5f, M3Theme.tertiaryGreen, true).apply {
                     letterSpacing = 0.08f
-                    setPadding(dp(4), dp(10), 0, dp(4))
+                    setPadding(dp(4), dp(12), 0, dp(6))
                 }
                 listContainer.addView(sectionHeader)
             } else {
                 val row = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(12), dp(8), dp(12), dp(8))
-                    background = rounded(Color.rgb(28, 31, 38), 10)
+                    setPadding(dp(14), dp(10), dp(14), dp(10))
+                    background = m3Rounded(M3Theme.surfaceContainerHigh, 14)
                 }
-                val kView = text(key, 11f, Color.rgb(162, 168, 180), false)
-                val vView = text(value, 11f, Color.WHITE, true).apply {
+                val kView = text(key, 11.5f, M3Theme.onSurfaceVariant, false)
+                val vView = text(value, 11.5f, M3Theme.onSurface, true).apply {
                     gravity = Gravity.END
                 }
                 row.addView(kView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.44f))
@@ -1728,14 +1818,14 @@ class MainActivity : Activity(), SensorEventListener {
                 listContainer.addView(
                     row,
                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                        bottomMargin = dp(4)
+                        bottomMargin = dp(5)
                     }
                 )
             }
         }
 
         scrollView.addView(listContainer)
-        val maxScrollHeight = (resources.displayMetrics.heightPixels * 0.52f).toInt()
+        val maxScrollHeight = (resources.displayMetrics.heightPixels * 0.50f).toInt()
         outer.addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxScrollHeight))
 
         val dialog = AlertDialog.Builder(this)
@@ -1743,13 +1833,13 @@ class MainActivity : Activity(), SensorEventListener {
             .create()
         dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
 
-        val closeBtn = pillButton("CLOSE", true).apply {
+        val closeBtn = m3FilledButton("Close").apply {
             setOnClickListener { dialog.dismiss() }
         }
         outer.addView(
             closeBtn,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)).apply {
-                topMargin = dp(14)
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply {
+                topMargin = dp(16)
             }
         )
         dialog.show()
@@ -1809,68 +1899,73 @@ class MainActivity : Activity(), SensorEventListener {
     private fun buildInterface() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(9, 10, 13))
-            setPadding(dp(18), dp(8), dp(18), dp(10))
+            setBackgroundColor(M3Theme.surfaceBg)
+            setPadding(dp(16), dp(8), dp(16), dp(12))
         }
         rootLayout = root
-        normalRootPadding = intArrayOf(dp(18), dp(8), dp(18), dp(10))
+        normalRootPadding = intArrayOf(dp(16), dp(8), dp(16), dp(12))
 
+        // --- Material 3 Top App Bar ---
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(2), dp(2), dp(2), dp(6))
         }
+
+        val brandIconBox = FrameLayout(this).apply {
+            background = m3Rounded(M3Theme.secondaryContainer, 14)
+        }
+        val brandIcon = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setImageDrawable(MaterialIconDrawable(MaterialIconDrawable.Type.VR_HEADSET, M3Theme.onSecondaryContainer))
+        }
+        brandIconBox.addView(brandIcon, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
+        header.addView(brandIconBox, LinearLayout.LayoutParams(dp(40), dp(40)).apply { rightMargin = dp(10) })
+
         val brandColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val brand = text("PANO PLAY", 18f, Color.WHITE, true).apply {
-            letterSpacing = 0.08f
-        }
-        val subtitle = text("YOUR VIDEOS. YOUR VIEW.", 9f, Color.rgb(142, 147, 157), true).apply {
-            letterSpacing = 0.12f
-            setPadding(0, dp(3), 0, 0)
-        }
+        val brand = text("PanoPlay", 19f, M3Theme.onSurface, true)
+        val subtitle = text("Spatial & VR Cinema", 11f, M3Theme.onSurfaceVariant, false)
         brandColumn.addView(brand)
         brandColumn.addView(subtitle)
         header.addView(brandColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
-        val metadataButton = text("ℹ", 16f, Color.WHITE, true).apply {
+        val metadataButton = m3IconCircleButton(MaterialIconDrawable.Type.INFO, "Inspect video metadata") {
+            chooseVideoForMetadata()
+        }
+        header.addView(metadataButton, LinearLayout.LayoutParams(dp(42), dp(42)).apply { rightMargin = dp(8) })
+
+        val settingsButton = m3IconCircleButton(MaterialIconDrawable.Type.SETTINGS, "Settings") {
+            openSettingsDialog()
+        }
+        header.addView(settingsButton, LinearLayout.LayoutParams(dp(42), dp(42)).apply { rightMargin = dp(8) })
+
+        val openButton = text("Open", 13f, M3Theme.onPrimary, true).apply {
             gravity = Gravity.CENTER
-            background = rounded(Color.rgb(31, 34, 41), 30)
+            setPadding(dp(16), 0, dp(18), 0)
+            background = m3RipplePill(M3Theme.primary, 22)
             isClickable = true
             isFocusable = true
-            contentDescription = "Inspect video metadata"
-            setOnClickListener { chooseVideoForMetadata() }
-        }
-        header.addView(
-            metadataButton,
-            LinearLayout.LayoutParams(dp(40), dp(40)).apply {
-                rightMargin = dp(6)
-            }
-        )
-
-        val settingsButton = text("⚙", 16f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            background = rounded(Color.rgb(31, 34, 41), 30)
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Settings"
-            setOnClickListener { openSettingsDialog() }
-        }
-        header.addView(
-            settingsButton,
-            LinearLayout.LayoutParams(dp(40), dp(40)).apply {
-                rightMargin = dp(6)
-            }
-        )
-
-        val openButton = pillButton("＋  OPEN", true).apply {
+            setPillLeftIcon(this, MaterialIconDrawable(MaterialIconDrawable.Type.FOLDER_OPEN, M3Theme.onPrimary), M3Theme.onPrimary)
             setOnClickListener { chooseVideo() }
         }
-        header.addView(openButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)))
+        header.addView(openButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)))
         root.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
         fullscreenChrome.add(header)
 
+        // --- Material 3 Rounded Cinema Stage ---
+        videoCardWrapper = FrameLayout(this).apply {
+            background = m3Card(Color.BLACK, 24, M3Theme.outlineVariant)
+            clipToOutline = true
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    val radius = if (isFullscreen) 0f else dp(24).toFloat()
+                    outline.setRoundRect(0, 0, view.width, view.height, radius)
+                }
+            }
+        }
+
         videoFrame = TapDetectFrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
-            clipToOutline = false
             onVideoDoubleTap = { x, _ -> handleDoubleTap(x) }
             onBrightnessSwipeStart = {
                 lastRenderedBrightnessPercent = -1
@@ -1921,11 +2016,10 @@ class MainActivity : Activity(), SensorEventListener {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
 
-        centerHud = text("☀  50%", 14f, Color.WHITE, true).apply {
+        centerHud = text("Brightness  50%", 13f, M3Theme.onSurface, true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(18), dp(10), dp(18), dp(10))
-            background = rounded(Color.argb(115, 15, 17, 22), 24)
-            alpha = 0.88f
+            background = m3Card(M3Theme.glassOverlay, 24, M3Theme.outlineVariant)
             elevation = dp(8).toFloat()
             visibility = View.GONE
         }
@@ -1938,9 +2032,9 @@ class MainActivity : Activity(), SensorEventListener {
             )
         )
 
-        val viewBadge = text("180° VIEW · LEFT EYE", 10f, Color.WHITE, true).apply {
-            setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = rounded(Color.argb(190, 15, 17, 22), 30)
+        val viewBadge = text("180° VIEW · LEFT EYE", 10.5f, M3Theme.onSecondaryContainer, true).apply {
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            background = m3Card(M3Theme.glassOverlay, 20, M3Theme.outlineVariant)
             elevation = dp(4).toFloat()
             visibility = if (showModeBadgeEnabled) View.VISIBLE else View.GONE
         }
@@ -1949,14 +2043,14 @@ class MainActivity : Activity(), SensorEventListener {
             ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.TOP or Gravity.START
         ).apply {
-            setMargins(dp(12), dp(12), 0, 0)
+            setMargins(dp(14), dp(14), 0, 0)
         }
         videoFrame.addView(viewBadge, badgeParams)
         modeBadge = viewBadge
 
-        fpsBadge = text("-- FPS", 10f, Color.rgb(120, 235, 165), true).apply {
-            setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = rounded(Color.argb(190, 15, 17, 22), 30)
+        fpsBadge = text("-- FPS", 10.5f, M3Theme.tertiaryGreen, true).apply {
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            background = m3Card(M3Theme.glassOverlay, 20, M3Theme.outlineVariant)
             elevation = dp(4).toFloat()
             visibility = if (showFpsEnabled) View.VISIBLE else View.GONE
         }
@@ -1965,20 +2059,23 @@ class MainActivity : Activity(), SensorEventListener {
             ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.TOP or Gravity.END
         ).apply {
-            setMargins(0, dp(12), dp(12), 0)
+            setMargins(0, dp(14), dp(14), 0)
         }
         videoFrame.addView(fpsBadge, fpsBadgeParams)
 
-        fullscreenButton = text("⛶", 22f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            background = rounded(Color.argb(205, 15, 17, 22), 30)
+        fullscreenButton = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setImageDrawable(MaterialIconDrawable(MaterialIconDrawable.Type.FULLSCREEN, M3Theme.onSurface))
+            background = m3Card(M3Theme.glassOverlay, 22, M3Theme.outlineVariant)
             elevation = dp(5).toFloat()
-            setPadding(dp(10), dp(4), dp(10), dp(4))
+            setPadding(dp(11), dp(11), dp(11), dp(11))
+            isClickable = true
+            isFocusable = true
             setOnClickListener { toggleFullscreen() }
             contentDescription = "Enter full screen"
         }
-        val fullscreenParams = FrameLayout.LayoutParams(dp(46), dp(42), Gravity.BOTTOM or Gravity.END).apply {
-            setMargins(0, 0, dp(12), dp(12))
+        val fullscreenParams = FrameLayout.LayoutParams(dp(44), dp(44), Gravity.BOTTOM or Gravity.END).apply {
+            setMargins(0, 0, dp(14), dp(14))
         }
         videoFrame.addView(fullscreenButton, fullscreenParams)
 
@@ -1986,27 +2083,30 @@ class MainActivity : Activity(), SensorEventListener {
         fullscreenTopBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6), dp(10), dp(10), dp(10))
+            setPadding(dp(12), dp(14), dp(16), dp(14))
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.argb(175, 8, 10, 14), Color.TRANSPARENT)
+                intArrayOf(Color.argb(200, 12, 15, 22), Color.TRANSPARENT)
             )
             elevation = dp(4).toFloat()
             visibility = View.GONE
         }
-        val exitFullscreenBtn = text("←", 20f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
+        val exitFullscreenBtn = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setImageDrawable(MaterialIconDrawable(MaterialIconDrawable.Type.BACK_ARROW, M3Theme.onSurface))
+            background = m3RipplePill(M3Theme.glassOverlay, 20)
+            setPadding(dp(9), dp(9), dp(9), dp(9))
             isClickable = true
             isFocusable = true
             contentDescription = "Exit full screen"
             setOnClickListener { if (isFullscreen) toggleFullscreen() }
         }
-        fullscreenTitleView = text("Now playing", 13.5f, Color.WHITE, true).apply {
+        fullscreenTitleView = text("Now playing", 14.5f, M3Theme.onSurface, true).apply {
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
         }
-        fullscreenTopBar.addView(exitFullscreenBtn, LinearLayout.LayoutParams(dp(34), dp(36)).apply {
-            rightMargin = dp(2)
+        fullscreenTopBar.addView(exitFullscreenBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+            rightMargin = dp(10)
         })
         fullscreenTopBar.addView(fullscreenTitleView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         videoFrame.addView(
@@ -2022,20 +2122,20 @@ class MainActivity : Activity(), SensorEventListener {
             visibility = View.GONE
         }
         val centerRewind = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_XY
-            setImageDrawable(TransportIconDrawable(TransportIconDrawable.Type.REWIND, Color.WHITE))
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setImageDrawable(TransportIconDrawable(TransportIconDrawable.Type.REWIND, M3Theme.onSurface))
+            background = m3RipplePill(M3Theme.glassOverlay, 24)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
             isClickable = true
             isFocusable = true
             contentDescription = "Rewind 10 seconds"
             setOnClickListener { performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
         }
         overlayPlayButton = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_XY
-            setImageDrawable(playVector)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(Color.rgb(122, 146, 255))
-            }
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setImageDrawable(overlayPlayVector)
+            background = m3RipplePill(M3Theme.primary, 24)
+            setPadding(dp(16), dp(16), dp(16), dp(16))
             isClickable = true
             isFocusable = true
             contentDescription = "Play or pause"
@@ -2047,8 +2147,10 @@ class MainActivity : Activity(), SensorEventListener {
             }
         }
         val centerForward = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_XY
-            setImageDrawable(TransportIconDrawable(TransportIconDrawable.Type.FORWARD, Color.WHITE))
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setImageDrawable(TransportIconDrawable(TransportIconDrawable.Type.FORWARD, M3Theme.onSurface))
+            background = m3RipplePill(M3Theme.glassOverlay, 24)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
             isClickable = true
             isFocusable = true
             contentDescription = "Forward 10 seconds"
@@ -2057,12 +2159,12 @@ class MainActivity : Activity(), SensorEventListener {
                 performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(26), dp(22)).apply {
-            rightMargin = dp(28)
+        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+            rightMargin = dp(24)
         })
-        fullscreenCenterControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(64), dp(64)))
-        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(26), dp(22)).apply {
-            leftMargin = dp(28)
+        fullscreenCenterControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(68), dp(68)))
+        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+            leftMargin = dp(24)
         })
         videoFrame.addView(
             fullscreenCenterControls,
@@ -2073,20 +2175,18 @@ class MainActivity : Activity(), SensorEventListener {
         fullscreenBottomControls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(12), dp(14), dp(12), dp(18))
+            setPadding(dp(16), dp(16), dp(16), dp(20))
             background = GradientDrawable(
                 GradientDrawable.Orientation.BOTTOM_TOP,
-                intArrayOf(Color.argb(190, 8, 10, 14), Color.TRANSPARENT)
+                intArrayOf(Color.argb(215, 12, 15, 22), Color.TRANSPARENT)
             )
             elevation = dp(4).toFloat()
             visibility = View.GONE
         }
 
-        overlaySeekBar = CinemaSeekBar(this).apply {
+        overlaySeekBar = MaterialSeekSlider(this).apply {
             max = 1000
-            onStartScrub = {
-                isScrubbing = true
-            }
+            onStartScrub = { isScrubbing = true }
             onProgressScrub = { value ->
                 val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
                 val previewMs = (value.toLong() * d) / 1000L
@@ -2108,24 +2208,24 @@ class MainActivity : Activity(), SensorEventListener {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        fullscreenCurrentTime = text("00:00", 11.5f, Color.WHITE, true).apply {
+        fullscreenCurrentTime = text("00:00", 12f, M3Theme.onSurface, true).apply {
             gravity = Gravity.CENTER_VERTICAL or Gravity.START
             includeFontPadding = false
         }
-        fullscreenDuration = text("00:00", 11.5f, Color.rgb(210, 214, 224), true).apply {
+        fullscreenDuration = text("00:00", 12f, M3Theme.onSurfaceVariant, true).apply {
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
             includeFontPadding = false
         }
-        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
-            rightMargin = dp(5)
+        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)).apply {
+            rightMargin = dp(8)
         })
-        fullscreenSeekRow.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(34), 1f))
-        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
-            leftMargin = dp(5)
+        fullscreenSeekRow.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(36), 1f))
+        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)).apply {
+            leftMargin = dp(8)
         })
         fullscreenBottomControls.addView(
             fullscreenSeekRow,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36))
         )
 
         val bottomPillsScroller = HorizontalScrollView(this).apply {
@@ -2137,60 +2237,27 @@ class MainActivity : Activity(), SensorEventListener {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        overlaySpeedButton = text("1.0x", 11.5f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            maxLines = 1
-            isSingleLine = true
-            setPadding(dp(13), dp(8), dp(14), dp(8))
-            background = rounded(Color.argb(145, 28, 32, 42), 22)
-            isClickable = true
-            isFocusable = true
-            setPillLeftIcon(this, PillIconDrawable(PillIconDrawable.Type.SPEED, Color.WHITE), Color.WHITE)
-            setOnClickListener { showSpeedPicker(this) }
+        overlaySpeedButton = m3OverlayPill("1.0x", MaterialIconDrawable.Type.SPEED) {
+            showSpeedPicker(it)
         }
-        overlayRecenterButton = text("Recenter", 11.5f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            maxLines = 1
-            isSingleLine = true
-            setPadding(dp(13), dp(8), dp(14), dp(8))
-            background = rounded(Color.argb(145, 28, 32, 42), 22)
-            isClickable = true
-            isFocusable = true
-            setPillLeftIcon(this, PillIconDrawable(PillIconDrawable.Type.RECENTER, Color.WHITE), Color.WHITE)
-            setOnClickListener {
-                if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
-                    vrSurfaceView.resetView()
-                }
+        overlayRecenterButton = m3OverlayPill("Recenter", MaterialIconDrawable.Type.RECENTER) {
+            if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+                vrSurfaceView.resetView()
             }
         }
-        overlayMotionButton = text("Motion", 11.5f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            maxLines = 1
-            isSingleLine = true
-            setPadding(dp(13), dp(8), dp(14), dp(8))
-            background = rounded(Color.argb(145, 28, 32, 42), 22)
-            isClickable = true
-            isFocusable = true
-            setPillLeftIcon(this, PillIconDrawable(PillIconDrawable.Type.MOTION, Color.WHITE), Color.WHITE)
-            setOnClickListener { setMotionTrackingEnabled(!isMotionEnabled) }
+        overlayMotionButton = m3OverlayPill("Motion", MaterialIconDrawable.Type.MOTION) {
+            setMotionTrackingEnabled(!isMotionEnabled)
         }
-        overlayRotateButton = text("Landscape", 11.5f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            maxLines = 1
-            isSingleLine = true
-            setPadding(dp(14), dp(8), dp(14), dp(8))
-            background = rounded(Color.argb(145, 28, 32, 42), 22)
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { toggleFullscreenOrientation() }
+        overlayRotateButton = m3OverlayPill("Landscape", MaterialIconDrawable.Type.ROTATE) {
+            toggleFullscreenOrientation()
         }
 
         val textPills = listOf(overlaySpeedButton, overlayRecenterButton, overlayMotionButton, overlayRotateButton)
         textPills.forEachIndexed { idx, pill ->
             bottomPillsRow.addView(
                 pill,
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(35)).apply {
-                    if (idx < textPills.lastIndex) rightMargin = dp(6)
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)).apply {
+                    if (idx < textPills.lastIndex) rightMargin = dp(8)
                 }
             )
         }
@@ -2208,123 +2275,160 @@ class MainActivity : Activity(), SensorEventListener {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
         )
 
+        // Empty State Card inside Stage
         placeholder = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(dp(28), dp(24), dp(28), dp(24))
-            background = rounded(Color.argb(205, 10, 12, 16), 18)
+            setPadding(dp(28), dp(26), dp(28), dp(26))
+            background = m3Card(M3Theme.glassOverlay, 24, M3Theme.outlineVariant)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { chooseVideo() }
         }
-        val playGlyph = text("▶", 30f, Color.rgb(255, 83, 98), true).apply {
+        val playCircle = FrameLayout(this).apply {
+            background = m3Rounded(M3Theme.primary, 28)
+        }
+        val playGlyph = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setImageDrawable(playVectorDark)
+        }
+        playCircle.addView(playGlyph, FrameLayout.LayoutParams(dp(26), dp(26), Gravity.CENTER))
+
+        val placeholderTitle = text("Select a VR or 2D Video", 16f, M3Theme.onSurface, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(16), 0, dp(6))
+        }
+        val placeholderSub = text("Tap anywhere here to browse files from your device", 12f, M3Theme.onSurfaceVariant, false).apply {
             gravity = Gravity.CENTER
         }
-        val placeholderTitle = text("CHOOSE A VIDEO", 16f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(14), 0, dp(6))
-        }
-        val placeholderSub = text("Open a file to start watching on your phone", 12f, Color.rgb(174, 179, 188), false).apply {
-            gravity = Gravity.CENTER
-        }
-        placeholder.addView(playGlyph)
+        placeholder.addView(playCircle, LinearLayout.LayoutParams(dp(56), dp(56)))
         placeholder.addView(placeholderTitle)
         placeholder.addView(placeholderSub)
-        placeholder.setOnClickListener { chooseVideo() }
+
         val placeholderParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.CENTER
         ).apply {
-            setMargins(dp(32), 0, dp(32), 0)
+            setMargins(dp(28), 0, dp(28), 0)
         }
         videoFrame.addView(placeholder, placeholderParams)
 
-        root.addView(videoFrame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        videoCardWrapper.addView(
+            videoFrame,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
+        root.addView(videoCardWrapper, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        titleView = text("No video selected", 13f, Color.WHITE, true).apply {
+        // --- Video Title Strip ---
+        titleView = text("No video selected", 14f, M3Theme.onSurface, true).apply {
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(4), dp(12), dp(4), dp(8))
         }
-        root.addView(titleView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(24)))
+        root.addView(titleView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         fullscreenChrome.add(titleView)
 
-        val modeRow = LinearLayout(this).apply {
+        // --- Material 3 Segmented Pill Bar 1: Projection Mode ---
+        val modeContainer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, dp(8))
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            background = m3Card(M3Theme.surfaceContainer, 20, M3Theme.outlineVariant)
         }
-        flatChip = modeChip("FLAT 2D", VrVideoSurfaceView.Projection.FLAT)
-        oneEightyChip = modeChip("180°", VrVideoSurfaceView.Projection.VR180)
-        threeSixtyChip = modeChip("360°", VrVideoSurfaceView.Projection.VR360)
-        modeRow.addView(flatChip, LinearLayout.LayoutParams(0, dp(42), 1f).apply { rightMargin = dp(5) })
-        modeRow.addView(oneEightyChip, LinearLayout.LayoutParams(0, dp(42), 1f).apply { leftMargin = dp(5); rightMargin = dp(5) })
-        modeRow.addView(threeSixtyChip, LinearLayout.LayoutParams(0, dp(42), 1f).apply { leftMargin = dp(5) })
-        root.addView(modeRow)
-        fullscreenChrome.add(modeRow)
+        flatChip = modeChip("Flat 2D", VrVideoSurfaceView.Projection.FLAT)
+        oneEightyChip = modeChip("180° VR", VrVideoSurfaceView.Projection.VR180)
+        threeSixtyChip = modeChip("360° VR", VrVideoSurfaceView.Projection.VR360)
+        modeContainer.addView(flatChip, LinearLayout.LayoutParams(0, dp(38), 1f).apply { rightMargin = dp(3) })
+        modeContainer.addView(oneEightyChip, LinearLayout.LayoutParams(0, dp(38), 1f).apply { leftMargin = dp(3); rightMargin = dp(3) })
+        modeContainer.addView(threeSixtyChip, LinearLayout.LayoutParams(0, dp(38), 1f).apply { leftMargin = dp(3) })
+        root.addView(modeContainer, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(8)
+        })
+        fullscreenChrome.add(modeContainer)
 
-        val stereoRow = LinearLayout(this).apply {
+        // --- Material 3 Segmented Pill Bar 2: Stereo Eye Layout ---
+        val stereoContainer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(6))
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            background = m3Card(M3Theme.surfaceContainer, 18, M3Theme.outlineVariant)
         }
-        monoChip = stereoChip("MONO", VrVideoSurfaceView.StereoLayout.MONO)
-        leftEyeChip = stereoChip("SBS LEFT", VrVideoSurfaceView.StereoLayout.SBS_LEFT)
-        rightEyeChip = stereoChip("SBS RIGHT", VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
-        stereoRow.addView(monoChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { rightMargin = dp(4) })
-        stereoRow.addView(leftEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
-        stereoRow.addView(rightEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4) })
-        root.addView(stereoRow)
-        fullscreenChrome.add(stereoRow)
+        monoChip = stereoChip("Mono", VrVideoSurfaceView.StereoLayout.MONO)
+        leftEyeChip = stereoChip("SBS Left", VrVideoSurfaceView.StereoLayout.SBS_LEFT)
+        rightEyeChip = stereoChip("SBS Right", VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
+        stereoContainer.addView(monoChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { rightMargin = dp(3) })
+        stereoContainer.addView(leftEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(3); rightMargin = dp(3) })
+        stereoContainer.addView(rightEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(3) })
+        root.addView(stereoContainer, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(10)
+        })
+        fullscreenChrome.add(stereoContainer)
+
+        // --- Material 3 Bottom Playback Deck Card ---
+        val playbackDeck = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(12))
+            background = m3Card(M3Theme.surfaceContainer, 24, M3Theme.outlineVariant)
+        }
 
         val seekRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        currentTimeView = text("00:00", 10f, Color.rgb(184, 189, 198), false)
-        durationView = text("00:00", 10f, Color.rgb(184, 189, 198), false)
-        seekBar = SeekBar(this).apply {
-            max = 1000
-            progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(255, 79, 94))
-            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(73, 77, 85))
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onStartTrackingTouch(seekBar: SeekBar?) { isScrubbing = true }
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
-                    if (duration > 0L) {
-                        performSafeSeek((this@MainActivity.seekBar.progress / 1000f * duration).toLong())
-                    }
-                    isScrubbing = false
-                }
-                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    if (fromUser) {
-                        val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
-                        currentTimeView.text = formatTime((duration * progress) / 1000L)
-                    }
-                }
-            })
+        currentTimeView = text("00:00", 11f, M3Theme.onSurfaceVariant, true).apply {
+            gravity = Gravity.CENTER_VERTICAL or Gravity.START
         }
-        currentTimeView.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-        currentTimeView.includeFontPadding = false
-        durationView.gravity = Gravity.CENTER_VERTICAL or Gravity.END
-        durationView.includeFontPadding = false
-        seekRow.addView(currentTimeView, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.MATCH_PARENT))
-        seekRow.addView(seekBar, LinearLayout.LayoutParams(0, dp(30), 1f))
-        seekRow.addView(durationView, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.MATCH_PARENT))
-        root.addView(seekRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34)))
-        fullscreenChrome.add(seekRow)
+        durationView = text("00:00", 11f, M3Theme.onSurfaceVariant, true).apply {
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+        }
+        seekBar = MaterialSeekSlider(this).apply {
+            max = 1000
+            onStartScrub = { isScrubbing = true }
+            onProgressScrub = { progress ->
+                val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
+                currentTimeView.text = formatTime((duration * progress) / 1000L)
+            }
+            onStopScrub = { progress ->
+                val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
+                if (duration > 0L) {
+                    performSafeSeek((progress / 1000f * duration).toLong())
+                }
+                isScrubbing = false
+            }
+        }
+        seekRow.addView(currentTimeView, LinearLayout.LayoutParams(dp(42), dp(32)))
+        seekRow.addView(seekBar, LinearLayout.LayoutParams(0, dp(32), 1f))
+        seekRow.addView(durationView, LinearLayout.LayoutParams(dp(42), dp(32)))
+        playbackDeck.addView(seekRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32)))
 
         val transport = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(4), 0, dp(5))
+            setPadding(0, dp(6), 0, 0)
         }
-        speedButton = transportButton("1.0x").apply {
+        speedButton = text("1.0x", 12f, M3Theme.onSurface, true).apply {
+            gravity = Gravity.CENTER
+            background = m3RipplePill(M3Theme.surfaceContainerHigh, 16)
+            isClickable = true
+            isFocusable = true
             setOnClickListener { showSpeedPicker(this) }
         }
-        val backButton = transportButton("-10s").apply {
+        val backButton = text("-10s", 12f, M3Theme.onSurface, true).apply {
+            gravity = Gravity.CENTER
+            background = m3RipplePill(M3Theme.surfaceContainerHigh, 16)
+            isClickable = true
+            isFocusable = true
             setOnClickListener { performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
         }
-        playButton = transportButton("▶", true).apply {
-            textSize = 20f
+        playButton = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setImageDrawable(playVectorDark)
+            background = m3RipplePill(M3Theme.primary, 24)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Play or pause"
             setOnClickListener {
                 if (player.isPlaying) player.pause() else {
                     if (player.playbackState == Player.STATE_ENDED) performSafeSeek(0L)
@@ -2332,34 +2436,47 @@ class MainActivity : Activity(), SensorEventListener {
                 }
             }
         }
-        val forwardButton = transportButton("+10s").apply {
+        val forwardButton = text("+10s", 12f, M3Theme.onSurface, true).apply {
+            gravity = Gravity.CENTER
+            background = m3RipplePill(M3Theme.surfaceContainerHigh, 16)
+            isClickable = true
+            isFocusable = true
             setOnClickListener {
                 val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
                 performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-
-        transport.addView(speedButton, LinearLayout.LayoutParams(dp(46), dp(46)).apply {
-            leftMargin = dp(3); rightMargin = dp(3)
-        })
-        transport.addView(backButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
-            leftMargin = dp(3); rightMargin = dp(3)
-        })
-        transport.addView(playButton, LinearLayout.LayoutParams(dp(58), dp(46)).apply {
-            leftMargin = dp(3); rightMargin = dp(3)
-        })
-        transport.addView(forwardButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
-            leftMargin = dp(3); rightMargin = dp(3)
-        })
-        root.addView(transport)
-        fullscreenChrome.add(transport)
-
-        val hint = text("DRAG TO LOOK AROUND  •  PINCH TO ZOOM  •  L BRIGHTNESS", 9f, Color.rgb(119, 125, 136), true).apply {
-            gravity = Gravity.CENTER
-            letterSpacing = 0.035f
-            setPadding(0, dp(6), 0, dp(2))
+        val recenterMiniBtn = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setImageDrawable(MaterialIconDrawable(MaterialIconDrawable.Type.RECENTER, M3Theme.onSurface))
+            background = m3RipplePill(M3Theme.surfaceContainerHigh, 16)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Recenter VR View"
+            setOnClickListener {
+                if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+                    vrSurfaceView.resetView()
+                    showCenterHud("View Recentered", 650L)
+                }
+            }
         }
-        root.addView(hint, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(22)))
+
+        transport.addView(speedButton, LinearLayout.LayoutParams(dp(54), dp(46)).apply { rightMargin = dp(8) })
+        transport.addView(backButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { rightMargin = dp(8) })
+        transport.addView(playButton, LinearLayout.LayoutParams(dp(74), dp(48)).apply { rightMargin = dp(8) })
+        transport.addView(forwardButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { rightMargin = dp(8) })
+        transport.addView(recenterMiniBtn, LinearLayout.LayoutParams(dp(46), dp(46)))
+
+        playbackDeck.addView(transport, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(playbackDeck, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        fullscreenChrome.add(playbackDeck)
+
+        val hint = text("Drag to Look  •  Pinch to Zoom  •  Left Swipe Brightness", 10f, M3Theme.onSurfaceVariant, false).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, 0)
+        }
+        root.addView(hint, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         fullscreenChrome.add(hint)
 
         setContentView(root)
@@ -2381,7 +2498,7 @@ class MainActivity : Activity(), SensorEventListener {
             if (isFullscreen) {
                 view.setPadding(0, 0, 0, 0)
             } else {
-                view.setPadding(dp(18), dp(8) + topInset, dp(18), dp(10) + bottomInset)
+                view.setPadding(dp(16), dp(8) + topInset, dp(16), dp(10) + bottomInset)
             }
             insets
         }
@@ -2398,8 +2515,10 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var rightEyeChip: TextView
 
     private fun stereoChip(label: String, layout: VrVideoSurfaceView.StereoLayout): TextView =
-        text(label, 10f, Color.WHITE, true).apply {
+        text(label, 11.5f, M3Theme.onSurfaceVariant, true).apply {
             gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
             setOnClickListener {
                 stereoLayout = layout
                 vrSurfaceView.setStereoLayout(layout)
@@ -2409,8 +2528,10 @@ class MainActivity : Activity(), SensorEventListener {
         }
 
     private fun modeChip(label: String, projection: VrVideoSurfaceView.Projection): TextView =
-        text(label, 12f, Color.WHITE, true).apply {
+        text(label, 12.5f, M3Theme.onSurfaceVariant, true).apply {
             gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
             setOnClickListener { setProjection(projection) }
         }
 
@@ -2439,8 +2560,8 @@ class MainActivity : Activity(), SensorEventListener {
     private fun updateBadgeText() {
         val projectionLabel = when (currentProjection) {
             VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
-            VrVideoSurfaceView.Projection.VR180 -> "180° VIEW"
-            VrVideoSurfaceView.Projection.VR360 -> "360° VIEW"
+            VrVideoSurfaceView.Projection.VR180 -> "180° VR"
+            VrVideoSurfaceView.Projection.VR360 -> "360° VR"
         }
         modeBadge.text = if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
             val eyeLabel = when (stereoLayout) {
@@ -2455,16 +2576,20 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     private fun updateModeChips() {
-        fun style(view: TextView, active: Boolean) {
-            view.background = rounded(if (active) Color.rgb(255, 79, 94) else Color.rgb(28, 31, 38), 12)
-            view.setTextColor(if (active) Color.WHITE else Color.rgb(188, 193, 202))
+        fun styleSegment(view: TextView, active: Boolean, radiusDp: Int) {
+            view.background = if (active) {
+                m3RipplePill(M3Theme.secondaryContainer, radiusDp)
+            } else {
+                m3RipplePill(Color.TRANSPARENT, radiusDp)
+            }
+            view.setTextColor(if (active) M3Theme.onSecondaryContainer else M3Theme.onSurfaceVariant)
         }
-        style(flatChip, currentProjection == VrVideoSurfaceView.Projection.FLAT)
-        style(oneEightyChip, currentProjection == VrVideoSurfaceView.Projection.VR180)
-        style(threeSixtyChip, currentProjection == VrVideoSurfaceView.Projection.VR360)
-        style(monoChip, stereoLayout == VrVideoSurfaceView.StereoLayout.MONO)
-        style(leftEyeChip, stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT)
-        style(rightEyeChip, stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
+        styleSegment(flatChip, currentProjection == VrVideoSurfaceView.Projection.FLAT, 16)
+        styleSegment(oneEightyChip, currentProjection == VrVideoSurfaceView.Projection.VR180, 16)
+        styleSegment(threeSixtyChip, currentProjection == VrVideoSurfaceView.Projection.VR360, 16)
+        styleSegment(monoChip, stereoLayout == VrVideoSurfaceView.StereoLayout.MONO, 14)
+        styleSegment(leftEyeChip, stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT, 14)
+        styleSegment(rightEyeChip, stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_RIGHT, 14)
     }
 
     private fun chooseVideo() {
@@ -2559,25 +2684,21 @@ class MainActivity : Activity(), SensorEventListener {
         fullscreenControlsVisible = true
         fullscreenChrome.forEach { it.visibility = if (isFullscreen) View.GONE else View.VISIBLE }
         fullscreenButton.visibility = if (isFullscreen) View.GONE else View.VISIBLE
-        val params = videoFrame.layoutParams as LinearLayout.LayoutParams
+        val params = videoCardWrapper.layoutParams as LinearLayout.LayoutParams
         if (isFullscreen) {
-            normalVideoMargins[0] = params.topMargin
-            normalVideoMargins[1] = params.bottomMargin
             params.topMargin = 0
             params.bottomMargin = 0
             params.width = ViewGroup.LayoutParams.MATCH_PARENT
             params.height = 0
-            videoFrame.setBackgroundColor(Color.BLACK)
-            videoFrame.clipToOutline = false
             params.weight = 1f
+            videoCardWrapper.background = m3Rounded(Color.BLACK, 0)
+            videoCardWrapper.invalidateOutline()
             rootLayout.setPadding(0, 0, 0, 0)
-            rootLayout.clipToPadding = false
-            rootLayout.clipChildren = false
             window.setBackgroundDrawableResource(android.R.color.black)
             overlayRotateButton.text = "Landscape"
-            overlayPlayButton.setImageDrawable(if (player.isPlaying) pauseVector else playVector)
-            (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
-            (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
+            overlayPlayButton.setImageDrawable(if (player.isPlaying) overlayPauseVector else overlayPlayVector)
+            (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(64)
+            (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(64)
             enterImmersiveMode()
         } else {
             if (isMotionEnabled) {
@@ -2587,20 +2708,19 @@ class MainActivity : Activity(), SensorEventListener {
                 isFullscreenLandscape = false
                 requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             }
-            params.topMargin = normalVideoMargins[0]
-            params.bottomMargin = normalVideoMargins[1]
             params.height = 0
             params.weight = 1f
+            videoCardWrapper.background = m3Card(Color.BLACK, 24, M3Theme.outlineVariant)
+            videoCardWrapper.invalidateOutline()
             rootLayout.setPadding(
                 normalRootPadding[0], normalRootPadding[1],
                 normalRootPadding[2], normalRootPadding[3]
             )
-            (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(12)
-            (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(12)
-            fullscreenButton.contentDescription = "Enter full screen"
+            (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(14)
+            (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(14)
             exitImmersiveMode()
         }
-        videoFrame.layoutParams = params
+        videoCardWrapper.layoutParams = params
         if (isFullscreen) {
             (videoFrame as TapDetectFrameLayout).apply {
                 onVideoSingleTap = { setFullscreenControlsVisible(!fullscreenControlsVisible) }
@@ -2710,19 +2830,53 @@ class MainActivity : Activity(), SensorEventListener {
         super.onDestroy()
     }
 
-    private fun transportButton(label: String, primary: Boolean = false): TextView =
-        text(label, if (primary) 16f else 11f, Color.WHITE, true).apply {
+    // --- Material 3 UI Helper Factories ---
+
+    private fun m3IconCircleButton(
+        iconType: MaterialIconDrawable.Type,
+        desc: String,
+        onClick: () -> Unit
+    ): ImageView = ImageView(this).apply {
+        scaleType = ImageView.ScaleType.CENTER_INSIDE
+        setImageDrawable(MaterialIconDrawable(iconType, M3Theme.onSurface))
+        background = m3RipplePill(M3Theme.surfaceContainerHigh, 21)
+        setPadding(dp(10), dp(10), dp(10), dp(10))
+        isClickable = true
+        isFocusable = true
+        contentDescription = desc
+        setOnClickListener { onClick() }
+    }
+
+    private fun m3OverlayPill(
+        label: String,
+        iconType: MaterialIconDrawable.Type,
+        onClick: (View) -> Unit
+    ): TextView = text(label, 12f, M3Theme.onSurface, true).apply {
+        gravity = Gravity.CENTER
+        maxLines = 1
+        isSingleLine = true
+        setPadding(dp(14), dp(8), dp(16), dp(8))
+        background = m3RipplePill(M3Theme.glassOverlay, 22)
+        isClickable = true
+        isFocusable = true
+        setPillLeftIcon(this, MaterialIconDrawable(iconType, M3Theme.onSurface), M3Theme.onSurface)
+        setOnClickListener { onClick(this) }
+    }
+
+    private fun m3FilledButton(label: String): TextView =
+        text(label, 13f, M3Theme.onPrimary, true).apply {
             gravity = Gravity.CENTER
-            background = rounded(if (primary) Color.rgb(255, 79, 94) else Color.rgb(28, 31, 38), 13)
+            setPadding(dp(18), 0, dp(18), 0)
+            background = m3RipplePill(M3Theme.primary, 24)
             isClickable = true
             isFocusable = true
         }
 
-    private fun pillButton(label: String, accent: Boolean): TextView =
-        text(label, 11f, Color.WHITE, true).apply {
+    private fun m3TonalButton(label: String): TextView =
+        text(label, 13f, M3Theme.onSecondaryContainer, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(14), 0, dp(14), 0)
-            background = rounded(if (accent) Color.rgb(255, 79, 94) else Color.rgb(31, 34, 41), 30)
+            setPadding(dp(18), 0, dp(18), 0)
+            background = m3RipplePill(M3Theme.secondaryContainer, 24)
             isClickable = true
             isFocusable = true
         }
@@ -2731,13 +2885,25 @@ class MainActivity : Activity(), SensorEventListener {
         text = label
         textSize = sizeSp
         setTextColor(color)
-        typeface = if (bold) Typeface.create("sans-serif", Typeface.BOLD) else Typeface.create("sans-serif", Typeface.NORMAL)
+        typeface = if (bold) Typeface.create("sans-serif-medium", Typeface.BOLD) else Typeface.create("sans-serif", Typeface.NORMAL)
         includeFontPadding = false
     }
 
-    private fun rounded(color: Int, radiusDp: Int): GradientDrawable = GradientDrawable().apply {
+    private fun m3Rounded(color: Int, radiusDp: Int): GradientDrawable = GradientDrawable().apply {
         setColor(color)
         cornerRadius = dp(radiusDp).toFloat()
+    }
+
+    private fun m3Card(fillColor: Int, radiusDp: Int, strokeColor: Int): GradientDrawable = GradientDrawable().apply {
+        setColor(fillColor)
+        cornerRadius = dp(radiusDp).toFloat()
+        setStroke(dp(1), strokeColor)
+    }
+
+    private fun m3RipplePill(fillColor: Int, radiusDp: Int): RippleDrawable {
+        val content = m3Rounded(fillColor, radiusDp)
+        val mask = m3Rounded(Color.WHITE, radiusDp)
+        return RippleDrawable(ColorStateList.valueOf(M3Theme.rippleColor), content, mask)
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
