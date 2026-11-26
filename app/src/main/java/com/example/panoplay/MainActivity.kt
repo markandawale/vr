@@ -1389,7 +1389,7 @@ class MainActivity : Activity(), SensorEventListener {
         fineVolumePercent = systemPercent
         if (!isMuted) {
             preMutePlayerGain = 1.0f
-            player.volume = if (systemPercent == 0) 0f else 1.0f
+            player.volume = 1.0f
         }
         updateMuteButtonsUi()
     }
@@ -1404,8 +1404,7 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     /**
-     * Exact 1% step volume control (1, 2, 3... 100%) on right-side swipe without altering
-     * system volume on mute/unmute toggles.
+     * Exact 1% step volume control (1, 2, 3... 100%) on right-side swipe.
      */
     private fun applyVolumePercent(targetPercent: Int) {
         val percent = targetPercent.coerceIn(0, 100)
@@ -1438,21 +1437,11 @@ class MainActivity : Activity(), SensorEventListener {
         val systemPercent = getSystemVolumePercent()
         if (isMuted) {
             isMuted = false
-            // Restore exact system volume level (if system volume is 0, bump 1 step so unmute is audible)
-            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-            val currentIndex = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-            if (currentIndex == 0) {
-                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, 1, 0)
-                fineVolumePercent = getSystemVolumePercent()
-                player.volume = 1.0f
-            } else {
-                fineVolumePercent = systemPercent
-                player.volume = preMutePlayerGain.coerceIn(0.05f, 1.0f)
-            }
+            fineVolumePercent = systemPercent
+            player.volume = if (systemPercent == 0) 1.0f else preMutePlayerGain.coerceIn(0.02f, 1.0f)
             updateMuteButtonsUi()
-            val displayPercent = getSystemVolumePercent()
-            hudVolumeDrawable.updateState(displayPercent, Color.WHITE)
-            showCenterHud("$displayPercent%", 750L, leftDrawable = hudVolumeDrawable)
+            hudVolumeDrawable.updateState(systemPercent, Color.WHITE)
+            showCenterHud("$systemPercent%", 750L, leftDrawable = hudVolumeDrawable)
         } else {
             isMuted = true
             preMutePlayerGain = if (player.volume > 0f) player.volume else 1.0f
@@ -1464,7 +1453,7 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     private fun updateMuteButtonsUi() {
-        val mutedNow = isMuted || getSystemVolumePercent() == 0
+        val mutedNow = isMuted
         if (::muteButton.isInitialized) {
             muteButton.text = if (mutedNow) "🔇" else "🔊"
             muteButton.background = rounded(
@@ -2362,7 +2351,6 @@ class MainActivity : Activity(), SensorEventListener {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
-        // Horizontal scrollable slider for bottom pills so buttons stay single-line and expandable
         val bottomPillsScroller = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
