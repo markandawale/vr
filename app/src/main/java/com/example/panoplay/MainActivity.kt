@@ -42,6 +42,7 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
@@ -616,7 +617,6 @@ private class TapDetectFrameLayout(context: Context) : FrameLayout(context) {
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         val tapSlop = 14f * resources.displayMetrics.density
-        // Low 6dp vertical threshold so left/right slide responds immediately without 1s delay
         val slideSlop = 6f * resources.displayMetrics.density
         val ignoredAtPoint = shouldIgnoreTap?.invoke(event.x, event.y) == true
         if (!ignoredAtPoint && activeGesture == GestureMode.NONE) {
@@ -808,7 +808,7 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var rootLayout: LinearLayout
     private lateinit var speedButton: TextView
     private lateinit var overlaySpeedButton: TextView
-    private lateinit var overlayMuteButton: TextView
+    private lateinit var overlayMuteButton: ImageView
     private lateinit var overlayRecenterButton: TextView
     private lateinit var overlayMotionButton: TextView
     private lateinit var overlayRotateButton: TextView
@@ -816,7 +816,7 @@ class MainActivity : Activity(), SensorEventListener {
     private val playVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PLAY, Color.rgb(14, 16, 22)) }
     private val pauseVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PAUSE, Color.rgb(14, 16, 22)) }
     private val hudVolumeDrawable by lazy { VolumeVectorDrawable(50, resources.displayMetrics.density, Color.WHITE) }
-    private val pillMuteDrawable by lazy { VolumeVectorDrawable(50, resources.displayMetrics.density, Color.WHITE) }
+    private val pillMuteDrawable by lazy { VolumeVectorDrawable(75, resources.displayMetrics.density, Color.WHITE) }
 
     private val fullscreenChrome = mutableListOf<View>()
     private var isFullscreen = false
@@ -827,7 +827,7 @@ class MainActivity : Activity(), SensorEventListener {
     private var lastRenderedBrightnessPercent = -1
     private var fineVolumePercent = -1
     private var isMuted = false
-    private var preMuteVolumePercent = 50
+    private var preMutePlayerGain = 1.0f
     private var lastRenderedFrames = 0
     private var lastFpsCheckTimeMs = 0L
     private var showFpsEnabled = false
@@ -1020,7 +1020,7 @@ class MainActivity : Activity(), SensorEventListener {
         player.setSeekParameters(SeekParameters.CLOSEST_SYNC)
 
         buildInterface()
-        syncInitialVolumeState()
+        syncWithSystemVolume()
 
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -1378,24 +1378,25 @@ class MainActivity : Activity(), SensorEventListener {
         showCenterHud("☀  $percent%")
     }
 
-    private fun syncInitialVolumeState() {
+    private fun getSystemVolumePercent(): Int {
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
         val cur = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).coerceIn(0, max)
-        fineVolumePercent = ((cur.toFloat() / max.toFloat()) * 100f).roundToInt().coerceIn(0, 100)
-        isMuted = fineVolumePercent == 0
-        if (fineVolumePercent > 0) {
-            preMuteVolumePercent = fineVolumePercent
-            player.volume = 1f
-        } else {
-            player.volume = 0f
+        return ((cur.toFloat() / max.toFloat()) * 100f).roundToInt().coerceIn(0, 100)
+    }
+
+    private fun syncWithSystemVolume() {
+        val systemPercent = getSystemVolumePercent()
+        fineVolumePercent = systemPercent
+        if (!isMuted) {
+            preMutePlayerGain = 1.0f
+            player.volume = if (systemPercent == 0) 0f else 1.0f
         }
         updateMuteButtonsUi()
     }
 
     private fun readCurrentVolumeNormalized(): Float {
+        val systemPercent = getSystemVolumePercent()
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-        val cur = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).coerceIn(0, max)
-        val systemPercent = ((cur.toFloat() / max.toFloat()) * 100f).roundToInt().coerceIn(0, 100)
         if (fineVolumePercent < 0 || (!isMuted && abs(systemPercent - fineVolumePercent) > (100 / max) + 1)) {
             fineVolumePercent = systemPercent
         }
@@ -1403,21 +1404,20 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     /**
-     * Exact 1% step volume control (1, 2, 3... 100%) by combining Android's coarse hardware
-     * stream steps with ExoPlayer's fine gain so every 1% swipe increments cleanly by 1.
+     * Exact 1% step volume control (1, 2, 3... 100%) on right-side swipe without altering
+     * system volume on mute/unmute toggles.
      */
-    private fun applyVolumePercent(targetPercent: Int, showHud: Boolean = true) {
+    private fun applyVolumePercent(targetPercent: Int) {
         val percent = targetPercent.coerceIn(0, 100)
         fineVolumePercent = percent
 
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
         if (percent == 0) {
             isMuted = true
+            preMutePlayerGain = 1.0f
             player.volume = 0f
         } else {
             isMuted = false
-            preMuteVolumePercent = percent
-            // Ceiling hardware index ensures player.volume stays in (0.0..1.0] for every 1% step
             val neededIndex = ceil((percent / 100.0) * max).toInt().coerceIn(1, max)
             val currentIndex = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
             if (currentIndex != neededIndex) {
@@ -1425,32 +1425,46 @@ class MainActivity : Activity(), SensorEventListener {
             }
             val indexPercent = (neededIndex.toFloat() / max.toFloat()) * 100f
             val fineGain = (percent.toFloat() / indexPercent).coerceIn(0.02f, 1.0f)
+            preMutePlayerGain = fineGain
             player.volume = fineGain
         }
 
         updateMuteButtonsUi()
-        if (showHud) {
-            hudVolumeDrawable.updateState(percent, Color.WHITE)
-            showCenterHud("$percent%", leftDrawable = hudVolumeDrawable)
-        }
+        hudVolumeDrawable.updateState(percent, Color.WHITE)
+        showCenterHud("$percent%", leftDrawable = hudVolumeDrawable)
     }
 
     private fun toggleMute() {
-        if (isMuted || fineVolumePercent == 0) {
-            val restore = preMuteVolumePercent.coerceIn(5, 100)
-            applyVolumePercent(restore, showHud = false)
-            hudVolumeDrawable.updateState(restore, Color.WHITE)
-            showCenterHud("$restore%", 750L, leftDrawable = hudVolumeDrawable)
+        val systemPercent = getSystemVolumePercent()
+        if (isMuted) {
+            isMuted = false
+            // Restore exact system volume level (if system volume is 0, bump 1 step so unmute is audible)
+            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+            val currentIndex = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            if (currentIndex == 0) {
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, 1, 0)
+                fineVolumePercent = getSystemVolumePercent()
+                player.volume = 1.0f
+            } else {
+                fineVolumePercent = systemPercent
+                player.volume = preMutePlayerGain.coerceIn(0.05f, 1.0f)
+            }
+            updateMuteButtonsUi()
+            val displayPercent = getSystemVolumePercent()
+            hudVolumeDrawable.updateState(displayPercent, Color.WHITE)
+            showCenterHud("$displayPercent%", 750L, leftDrawable = hudVolumeDrawable)
         } else {
-            preMuteVolumePercent = fineVolumePercent.coerceAtLeast(5)
-            applyVolumePercent(0, showHud = false)
+            isMuted = true
+            preMutePlayerGain = if (player.volume > 0f) player.volume else 1.0f
+            player.volume = 0f
+            updateMuteButtonsUi()
             hudVolumeDrawable.updateState(0, Color.WHITE)
-            showCenterHud("Muted", 750L, leftDrawable = hudVolumeDrawable)
+            showCenterHud("0%", 750L, leftDrawable = hudVolumeDrawable)
         }
     }
 
     private fun updateMuteButtonsUi() {
-        val mutedNow = isMuted || fineVolumePercent == 0
+        val mutedNow = isMuted || getSystemVolumePercent() == 0
         if (::muteButton.isInitialized) {
             muteButton.text = if (mutedNow) "🔇" else "🔊"
             muteButton.background = rounded(
@@ -1459,15 +1473,13 @@ class MainActivity : Activity(), SensorEventListener {
             )
         }
         if (::overlayMuteButton.isInitialized) {
-            val textColor = if (mutedNow) Color.rgb(14, 16, 22) else Color.WHITE
-            overlayMuteButton.text = if (mutedNow) "Muted" else "Mute"
+            val iconColor = if (mutedNow) Color.rgb(14, 16, 22) else Color.WHITE
             overlayMuteButton.background = rounded(
                 if (mutedNow) Color.rgb(255, 79, 94) else Color.argb(145, 28, 32, 42),
                 22
             )
-            overlayMuteButton.setTextColor(textColor)
-            pillMuteDrawable.updateState(if (mutedNow) 0 else 75, textColor)
-            setPillLeftIcon(overlayMuteButton, pillMuteDrawable, textColor)
+            pillMuteDrawable.updateState(if (mutedNow) 0 else 75, iconColor)
+            overlayMuteButton.invalidate()
         }
     }
 
@@ -2096,7 +2108,7 @@ class MainActivity : Activity(), SensorEventListener {
             onVolumeSwipe = { level ->
                 val targetPercent = (level * 100f).roundToInt().coerceIn(0, 100)
                 if (targetPercent != fineVolumePercent) {
-                    applyVolumePercent(targetPercent, showHud = true)
+                    applyVolumePercent(targetPercent)
                 }
             }
             onVolumeSwipeEnd = {
@@ -2350,32 +2362,42 @@ class MainActivity : Activity(), SensorEventListener {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
         )
 
-        val bottomPillsRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
+        // Horizontal scrollable slider for bottom pills so buttons stay single-line and expandable
+        val bottomPillsScroller = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
             setPadding(0, dp(10), 0, 0)
         }
-        overlaySpeedButton = text("1.0x", 11f, Color.WHITE, true).apply {
+        val bottomPillsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        overlaySpeedButton = text("1.0x", 11.5f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(11), dp(8), dp(12), dp(8))
+            maxLines = 1
+            isSingleLine = true
+            setPadding(dp(13), dp(8), dp(14), dp(8))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
             setPillLeftIcon(this, PillIconDrawable(PillIconDrawable.Type.SPEED, Color.WHITE), Color.WHITE)
             setOnClickListener { showSpeedPicker(this) }
         }
-        overlayMuteButton = text("Mute", 11f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(11), dp(8), dp(12), dp(8))
+        overlayMuteButton = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setImageDrawable(pillMuteDrawable)
+            setPadding(dp(13), dp(8), dp(13), dp(8))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
-            setPillLeftIcon(this, pillMuteDrawable, Color.WHITE)
+            contentDescription = "Mute or unmute"
             setOnClickListener { toggleMute() }
         }
-        overlayRecenterButton = text("Recenter", 11f, Color.WHITE, true).apply {
+        overlayRecenterButton = text("Recenter", 11.5f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(11), dp(8), dp(12), dp(8))
+            maxLines = 1
+            isSingleLine = true
+            setPadding(dp(13), dp(8), dp(14), dp(8))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
@@ -2386,41 +2408,55 @@ class MainActivity : Activity(), SensorEventListener {
                 }
             }
         }
-        overlayMotionButton = text("Motion", 11f, Color.WHITE, true).apply {
+        overlayMotionButton = text("Motion", 11.5f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(11), dp(8), dp(12), dp(8))
+            maxLines = 1
+            isSingleLine = true
+            setPadding(dp(13), dp(8), dp(14), dp(8))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
             setPillLeftIcon(this, PillIconDrawable(PillIconDrawable.Type.MOTION, Color.WHITE), Color.WHITE)
             setOnClickListener { setMotionTrackingEnabled(!isMotionEnabled) }
         }
-        overlayRotateButton = text("Landscape", 11f, Color.WHITE, true).apply {
+        overlayRotateButton = text("Landscape", 11.5f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            maxLines = 1
+            isSingleLine = true
+            setPadding(dp(14), dp(8), dp(14), dp(8))
             background = rounded(Color.argb(145, 28, 32, 42), 22)
             isClickable = true
             isFocusable = true
             setOnClickListener { toggleFullscreenOrientation() }
         }
 
-        val bottomPills = listOf(
+        val textPills = listOf(overlaySpeedButton, overlayRecenterButton, overlayMotionButton, overlayRotateButton)
+        bottomPillsRow.addView(
             overlaySpeedButton,
-            overlayMuteButton,
-            overlayRecenterButton,
-            overlayMotionButton,
-            overlayRotateButton
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(35)).apply {
+                rightMargin = dp(6)
+            }
         )
-        bottomPills.forEachIndexed { idx, pill ->
+        bottomPillsRow.addView(
+            overlayMuteButton,
+            LinearLayout.LayoutParams(dp(44), dp(35)).apply {
+                rightMargin = dp(6)
+            }
+        )
+        textPills.drop(1).forEachIndexed { idx, pill ->
             bottomPillsRow.addView(
                 pill,
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    if (idx < bottomPills.lastIndex) rightMargin = dp(5)
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(35)).apply {
+                    if (idx < textPills.drop(1).lastIndex) rightMargin = dp(6)
                 }
             )
         }
-        fullscreenBottomControls.addView(
+        bottomPillsScroller.addView(
             bottomPillsRow,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        )
+        fullscreenBottomControls.addView(
+            bottomPillsScroller,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         )
 
@@ -2915,7 +2951,7 @@ class MainActivity : Activity(), SensorEventListener {
 
     override fun onResume() {
         super.onResume()
-        syncInitialVolumeState()
+        syncWithSystemVolume()
         if (::vrSurfaceView.isInitialized) vrSurfaceView.onResume()
         if (isMotionEnabled && gyroSensor != null) {
             lastGyroTimestampNs = 0L
