@@ -66,6 +66,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
@@ -989,6 +990,11 @@ class MainActivity : Activity(), SensorEventListener {
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, true)
             .build()
+
+        // FIX: default is EXACT, which decodes every frame from the previous keyframe up to the
+        // target. VR videos are high-res with long GOPs, so landing far from a keyframe freezes
+        // playback for seconds. CLOSEST_SYNC jumps straight to the nearest keyframe instead.
+        player.setSeekParameters(SeekParameters.CLOSEST_SYNC)
 
         buildInterface()
 

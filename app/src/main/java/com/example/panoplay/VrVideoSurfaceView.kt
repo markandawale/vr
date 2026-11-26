@@ -25,7 +25,6 @@ import android.view.SurfaceView
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.PI
 import kotlin.math.abs
@@ -235,7 +234,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         @Volatile private var decoderSurfaceTexture: SurfaceTexture? = null
         @Volatile private var decoderSurface: Surface? = null
 
-        private val hasNewVideoFrame = AtomicBoolean(false)
+        private val pendingFrames = AtomicInteger(0)
         private val frameCounter = AtomicInteger(0)
         @Volatile private var measuredFps = 0
         private var fpsWindowStartMs = 0L
@@ -339,7 +338,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
-            hasNewVideoFrame.set(false)
+            pendingFrames.set(0)
             firstFrameDrawn = false
             frameCounter.set(0)
             measuredFps = 0
@@ -379,7 +378,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
         }
 
         override fun onFrameAvailable(surfaceTexture: SurfaceTexture?) {
-            hasNewVideoFrame.set(true)
+            pendingFrames.incrementAndGet()
             val count = frameCounter.incrementAndGet()
             val now = SystemClock.uptimeMillis()
             if (fpsWindowStartMs == 0L) {
@@ -401,14 +400,23 @@ class VrVideoSurfaceView @JvmOverloads constructor(
             if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE) return
             val st = decoderSurfaceTexture ?: return
 
+            // FIX: a boolean flag collapsed several queued frames into one updateTexImage(),
+            // so frames piled up in the SurfaceTexture queue (lag, and the decoder can stall
+            // once its output buffers are all waiting). Drain every pending frame each vsync.
             var updatedFrame = false
-            if (hasNewVideoFrame.compareAndSet(true, false)) {
+            var pending = pendingFrames.getAndSet(0)
+            if (pending > 0) {
+                if (pending > MAX_FRAMES_PER_VSYNC) pending = MAX_FRAMES_PER_VSYNC
                 try {
-                    st.updateTexImage()
+                    while (pending > 0) {
+                        st.updateTexImage()
+                        pending--
+                    }
                     st.getTransformMatrix(textureMatrix)
                     updatedFrame = true
                     firstFrameDrawn = true
-                } catch (_: RuntimeException) {
+                } catch (e: RuntimeException) {
+                    android.util.Log.w("PanoPlay", "updateTexImage failed", e)
                 }
             }
 
@@ -717,6 +725,7 @@ class VrVideoSurfaceView @JvmOverloads constructor(
 
     companion object {
         private const val DEFAULT_FOV = 92f
+        private const val MAX_FRAMES_PER_VSYNC = 4
         private const val VERTEX_SHADER = """
             uniform mat4 uMvpMatrix;
             uniform mat4 uTexMatrix;
