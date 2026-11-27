@@ -233,7 +233,7 @@ internal class SegmentedControl(context: Context, private val items: List<Item>)
             val startX = inset + segmentW * i + (segmentW - contentW) * 0.5f
 
             val glyph = glyphs[i]
-            glyph.tint = color
+            glyph.ink = color
             glyph.setBounds(
                 startX.toInt(),
                 (h * 0.5f - glyphSize * 0.5f).toInt(),

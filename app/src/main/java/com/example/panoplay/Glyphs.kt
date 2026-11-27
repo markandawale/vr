@@ -16,7 +16,7 @@ import kotlin.math.sin
  */
 internal class Glyph(
     private val kind: Kind,
-    var tint: Int = Pano.TEXT,
+    var ink: Int = Pano.TEXT,
     var accent: Int = Pano.SUN
 ) : Drawable() {
 
@@ -60,8 +60,8 @@ internal class Glyph(
         canvas.scale(scale, scale)
 
         stroke.strokeWidth = BASE_STROKE
-        stroke.color = shade(tint)
-        fill.color = shade(tint)
+        stroke.color = shade(ink)
+        fill.color = shade(ink)
 
         when (kind) {
             Kind.PLAY -> {
@@ -152,7 +152,7 @@ internal class Glyph(
             }
             Kind.LENS -> {
                 canvas.drawCircle(12f, 12f, 9.5f, stroke)
-                stroke.color = shade(tint, 0.55f)
+                stroke.color = shade(ink, 0.55f)
                 oval.set(7.6f, 2.5f, 16.4f, 21.5f)
                 canvas.drawOval(oval, stroke)
                 stroke.color = shade(accent)
@@ -182,7 +182,7 @@ internal class Glyph(
             }
             Kind.SPHERE360 -> {
                 canvas.drawCircle(12f, 12f, 8.8f, stroke)
-                stroke.color = shade(tint, 0.6f)
+                stroke.color = shade(ink, 0.6f)
                 oval.set(3.2f, 8.8f, 20.8f, 15.2f)
                 canvas.drawOval(oval, stroke)
             }
@@ -215,7 +215,7 @@ internal class Glyph(
         arrowHead(canvas, 12f, 5f, -1f, 0f, 3.6f)
         canvas.restore()
 
-        label.color = shade(tint)
+        label.color = shade(ink)
         label.typeface = Pano.medium
         val fm = label.fontMetrics
         canvas.drawText("10", 12f, 13.2f - (fm.ascent + fm.descent) / 2f, label)
