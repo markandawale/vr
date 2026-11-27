@@ -1591,12 +1591,13 @@ class MainActivity : Activity(), SensorEventListener {
 
         val bottomPillsScroller = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
+            isFillViewport = true // <-- Allows the child row to expand to full width when pills don't overflow
             overScrollMode = View.OVER_SCROLL_NEVER
             setPadding(0, dp(6), 0, 0)
         }
         val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            gravity = Gravity.CENTER // <-- Centers pills horizontally & vertically when screen is wide
         }
         overlaySpeedButton = glassPill("1.0x", Glyph.Kind.SPEED).apply {
             fontFeatureSettings = "tnum"
