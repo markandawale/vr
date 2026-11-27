@@ -364,7 +364,6 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var centerHud: TextView
     private lateinit var fpsBadge: TextView
     private lateinit var titleView: TextView
-    private lateinit var subtitleView: TextView
     private lateinit var playButton: ImageView
     private lateinit var seekBar: CinemaSeekBar
     private lateinit var currentTimeView: TextView
@@ -381,7 +380,6 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var overlayPlayButton: ImageView
     private lateinit var overlaySeekBar: CinemaSeekBar
     private lateinit var fullscreenTitleView: TextView
-    private lateinit var fullscreenSubtitleView: TextView
     private lateinit var fullscreenCurrentTime: TextView
     private lateinit var fullscreenDuration: TextView
     private lateinit var rootLayout: LinearLayout
@@ -1491,9 +1489,7 @@ class MainActivity : Activity(), SensorEventListener {
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.MIDDLE
         }
-        fullscreenSubtitleView = tv("", 12f, Pano.MUTED, Pano.regular)
         titleColumn.addView(fullscreenTitleView, lp(MATCH, WRAP))
-        titleColumn.addView(fullscreenSubtitleView, lp(MATCH, WRAP).apply { topMargin = dp(3) })
         fullscreenTopBar.addView(exitFullscreenBtn, lp(dp(42), dp(42)).apply { rightMargin = dp(12) })
         fullscreenTopBar.addView(titleColumn, lp(0, WRAP, 1f))
         videoFrame.addView(
@@ -1591,13 +1587,13 @@ class MainActivity : Activity(), SensorEventListener {
 
         val bottomPillsScroller = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
-            isFillViewport = true // <-- Allows the child row to expand to full width when pills don't overflow
+            isFillViewport = true
             overScrollMode = View.OVER_SCROLL_NEVER
             setPadding(0, dp(6), 0, 0)
         }
         val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER // <-- Centers pills horizontally & vertically when screen is wide
+            gravity = Gravity.CENTER
         }
         overlaySpeedButton = glassPill("1.0x", Glyph.Kind.SPEED).apply {
             fontFeatureSettings = "tnum"
@@ -1648,12 +1644,7 @@ class MainActivity : Activity(), SensorEventListener {
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         }
-        subtitleView = tv("Choose a video to begin", 13f, Pano.MUTED, Pano.regular).apply {
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-        }
         dock.addView(titleView, lp(MATCH, WRAP).apply { topMargin = dp(if (compact) 12 else 18) })
-        dock.addView(subtitleView, lp(MATCH, WRAP).apply { topMargin = dp(5) })
 
         seekBar = CinemaSeekBar(this).apply {
             max = 1000
@@ -1860,12 +1851,6 @@ class MainActivity : Activity(), SensorEventListener {
         VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "Right eye"
     }
 
-    private fun modeSummary(): String = when (currentProjection) {
-        VrVideoSurfaceView.Projection.FLAT -> "Flat 2D"
-        VrVideoSurfaceView.Projection.VR180 -> "180\u00B0 \u00B7 ${eyeLabel()}"
-        VrVideoSurfaceView.Projection.VR360 -> "360\u00B0 \u00B7 ${eyeLabel()}"
-    }
-
     private fun updateBadgeText() {
         val projectionLabel = when (currentProjection) {
             VrVideoSurfaceView.Projection.FLAT -> "Flat 2D"
@@ -1881,10 +1866,6 @@ class MainActivity : Activity(), SensorEventListener {
             )
         }
         modeBadge.text = badge
-        if (::subtitleView.isInitialized) {
-            subtitleView.text = if (currentVideoName.isBlank()) "Choose a video to begin" else modeSummary()
-        }
-        if (::fullscreenSubtitleView.isInitialized) fullscreenSubtitleView.text = modeSummary()
     }
 
     private fun updateModeChips() {
