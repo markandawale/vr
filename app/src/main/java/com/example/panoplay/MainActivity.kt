@@ -80,6 +80,14 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
+import android.app.Dialog
+import android.content.res.ColorStateList
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.RippleDrawable
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.TextUtils
+import android.text.style.ForegroundColorSpan
 
 /**
  * Resolves exact byte length from ContentResolver when ContentDataSource returns C.LENGTH_UNSET (-1),
@@ -151,348 +159,6 @@ private class SafeGuardDataSource(
     class Factory(private val context: Context) : DataSource.Factory {
         private val baseFactory = DefaultDataSource.Factory(context)
         override fun createDataSource(): DataSource = SafeGuardDataSource(context, baseFactory.createDataSource())
-    }
-}
-
-/**
- * Exact Material vector icons matching reference screenshot
- * for Speedometer, Recenter Crosshair, and Motion Compass pills.
- */
-private class PillIconDrawable(
-    private val iconType: Type,
-    private val tintColor: Int
-) : Drawable() {
-
-    enum class Type { SPEED, RECENTER, MOTION }
-
-    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = tintColor
-        style = Paint.Style.FILL
-    }
-    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = tintColor
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-    }
-    private val path = Path()
-    private val oval = RectF()
-
-    override fun draw(canvas: Canvas) {
-        val w = bounds.width().toFloat()
-        val h = bounds.height().toFloat()
-        if (w <= 0f || h <= 0f) return
-        val cx = w * 0.5f
-        val cy = h * 0.5f
-        val s = min(w, h)
-
-        fillPaint.color = tintColor
-        strokePaint.color = tintColor
-
-        when (iconType) {
-            Type.RECENTER -> {
-                strokePaint.strokeWidth = s * 0.11f
-                val r = s * 0.30f
-                canvas.drawCircle(cx, cy, r, strokePaint)
-                canvas.drawCircle(cx, cy, s * 0.11f, fillPaint)
-
-                val tickStart = r + s * 0.02f
-                val tickEnd = s * 0.46f
-                canvas.drawLine(cx, cy - tickStart, cx, cy - tickEnd, strokePaint)
-                canvas.drawLine(cx, cy + tickStart, cx, cy + tickEnd, strokePaint)
-                canvas.drawLine(cx - tickStart, cy, cx - tickEnd, cy, strokePaint)
-                canvas.drawLine(cx + tickStart, cy, cx + tickEnd, cy, strokePaint)
-            }
-            Type.MOTION -> {
-                val r = s * 0.42f
-                path.reset()
-                path.fillType = Path.FillType.EVEN_ODD
-                path.addCircle(cx, cy, r, Path.Direction.CW)
-
-                val tipDist = r * 0.64f
-                val sideDist = r * 0.23f
-                val diag = 0.7071f
-                val neX = cx + tipDist * diag
-                val neY = cy - tipDist * diag
-                val swX = cx - tipDist * diag
-                val swY = cy + tipDist * diag
-                val nwX = cx - sideDist * diag
-                val nwY = cy - sideDist * diag
-                val seX = cx + sideDist * diag
-                val seY = cy + sideDist * diag
-
-                path.moveTo(neX, neY)
-                path.lineTo(seX, seY)
-                path.lineTo(swX, swY)
-                path.lineTo(nwX, nwY)
-                path.close()
-                canvas.drawPath(path, fillPaint)
-
-                canvas.drawCircle(cx, cy, r * 0.11f, fillPaint)
-            }
-            Type.SPEED -> {
-                val gaugeCy = cy + s * 0.16f
-                val outerR = s * 0.40f
-                strokePaint.strokeWidth = s * 0.10f
-                oval.set(cx - outerR, gaugeCy - outerR, cx + outerR, gaugeCy + outerR)
-                canvas.drawArc(oval, 185f, 170f, false, strokePaint)
-
-                path.reset()
-                path.fillType = Path.FillType.EVEN_ODD
-                val innerR = s * 0.25f
-                oval.set(cx - innerR, gaugeCy - innerR, cx + innerR, gaugeCy + innerR)
-                path.addArc(oval, 180f, 180f)
-                path.lineTo(cx + innerR, gaugeCy + s * 0.06f)
-                path.lineTo(cx - innerR, gaugeCy + s * 0.06f)
-                path.close()
-                canvas.drawPath(path, fillPaint)
-
-                strokePaint.strokeWidth = s * 0.11f
-                canvas.drawLine(
-                    cx - s * 0.03f,
-                    gaugeCy - s * 0.02f,
-                    cx + s * 0.23f,
-                    gaugeCy - s * 0.28f,
-                    strokePaint
-                )
-            }
-        }
-    }
-
-    override fun setAlpha(alpha: Int) {
-        fillPaint.alpha = alpha
-        strokePaint.alpha = alpha
-    }
-
-    override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {
-        fillPaint.colorFilter = colorFilter
-        strokePaint.colorFilter = colorFilter
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
-}
-
-/**
- * Exact Material / Google Files vector icons for Play, Pause, Rewind, and Forward.
- */
-private class TransportIconDrawable(
-    private val iconType: Type,
-    private val tintColor: Int
-) : Drawable() {
-
-    enum class Type { PLAY, PAUSE, REWIND, FORWARD }
-
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = tintColor
-        style = Paint.Style.FILL
-    }
-    private val path = Path()
-    private val rect = RectF()
-
-    override fun draw(canvas: Canvas) {
-        val w = bounds.width().toFloat()
-        val h = bounds.height().toFloat()
-        if (w <= 0f || h <= 0f) return
-        val cx = w * 0.5f
-        val cy = h * 0.5f
-
-        when (iconType) {
-            Type.PLAY -> {
-                val halfH = h * 0.145f
-                val leftX = cx - w * 0.095f
-                val rightX = cx + w * 0.155f
-                path.reset()
-                path.moveTo(leftX, cy - halfH)
-                path.lineTo(rightX, cy)
-                path.lineTo(leftX, cy + halfH)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
-            Type.PAUSE -> {
-                val barW = w * 0.056f
-                val halfH = h * 0.14f
-                val gap = w * 0.044f
-
-                rect.set(cx - gap - barW, cy - halfH, cx - gap, cy + halfH)
-                canvas.drawRect(rect, paint)
-
-                rect.set(cx + gap, cy - halfH, cx + gap + barW, cy + halfH)
-                canvas.drawRect(rect, paint)
-            }
-            Type.REWIND -> {
-                val halfH = h * 0.34f
-                val triW = halfH * 1.32f
-                val overlap = triW * 0.22f
-                val totalW = triW * 2f - overlap
-                val startX = cx - totalW * 0.5f
-
-                val lTipX = startX
-                val lBaseX = lTipX + triW
-                path.reset()
-                path.moveTo(lTipX, cy)
-                path.lineTo(lBaseX, cy - halfH)
-                path.lineTo(lBaseX, cy + halfH)
-                path.close()
-                canvas.drawPath(path, paint)
-
-                val rTipX = lBaseX - overlap
-                val rBaseX = rTipX + triW
-                path.reset()
-                path.moveTo(rTipX, cy)
-                path.lineTo(rBaseX, cy - halfH)
-                path.lineTo(rBaseX, cy + halfH)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
-            Type.FORWARD -> {
-                val halfH = h * 0.34f
-                val triW = halfH * 1.32f
-                val overlap = triW * 0.22f
-                val totalW = triW * 2f - overlap
-                val startX = cx - totalW * 0.5f
-
-                val lBaseX = startX
-                val lTipX = lBaseX + triW
-                path.reset()
-                path.moveTo(lBaseX, cy - halfH)
-                path.lineTo(lTipX, cy)
-                path.lineTo(lBaseX, cy + halfH)
-                path.close()
-                canvas.drawPath(path, paint)
-
-                val rBaseX = lTipX - overlap
-                val rTipX = rBaseX + triW
-                path.reset()
-                path.moveTo(rBaseX, cy - halfH)
-                path.lineTo(rTipX, cy)
-                path.lineTo(rBaseX, cy + halfH)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
-        }
-    }
-
-    override fun setAlpha(alpha: Int) {
-        paint.alpha = alpha
-    }
-
-    override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {
-        paint.colorFilter = colorFilter
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
-}
-
-/**
- * Custom sleek cinema-style seek slider for fullscreen mode.
- */
-private class CinemaSeekBar(context: Context) : View(context) {
-    var max: Int = 1000
-    var progress: Int = 0
-        set(value) {
-            val clamped = value.coerceIn(0, max)
-            if (field != clamped) {
-                field = clamped
-                invalidate()
-            }
-        }
-
-    var onStartScrub: (() -> Unit)? = null
-    var onProgressScrub: ((Int) -> Unit)? = null
-    var onStopScrub: ((Int) -> Unit)? = null
-
-    private var isDragging = false
-    private val density = resources.displayMetrics.density
-
-    private val trackBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(85, 255, 255, 255)
-        style = Paint.Style.FILL
-    }
-    private val trackFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(122, 146, 255)
-        style = Paint.Style.FILL
-    }
-    private val thumbGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(80, 122, 146, 255)
-        style = Paint.Style.FILL
-    }
-    private val thumbCorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(122, 146, 255)
-        style = Paint.Style.FILL
-    }
-    private val trackRect = RectF()
-    private val fillRect = RectF()
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        val w = width.toFloat()
-        val h = height.toFloat()
-        if (w <= 0f || h <= 0f) return
-
-        val sidePad = 6.5f * density
-        val usableWidth = (w - sidePad * 2f).coerceAtLeast(1f)
-        val centerY = h * 0.5f
-
-        val trackHeight = (if (isDragging) 6f else 3.5f) * density
-        val halfTrack = trackHeight * 0.5f
-        val radius = halfTrack
-
-        val fraction = if (max > 0) (progress.toFloat() / max.toFloat()).coerceIn(0f, 1f) else 0f
-        val thumbX = sidePad + usableWidth * fraction
-
-        trackRect.set(sidePad, centerY - halfTrack, w - sidePad, centerY + halfTrack)
-        canvas.drawRoundRect(trackRect, radius, radius, trackBgPaint)
-
-        fillRect.set(sidePad, centerY - halfTrack, thumbX, centerY + halfTrack)
-        canvas.drawRoundRect(fillRect, radius, radius, trackFillPaint)
-
-        if (isDragging) {
-            canvas.drawCircle(thumbX, centerY, 13f * density, thumbGlowPaint)
-        }
-        val thumbRadius = (if (isDragging) 8.5f else 6.5f) * density
-        canvas.drawCircle(thumbX, centerY, thumbRadius, thumbCorePaint)
-    }
-
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        val sidePad = 6.5f * density
-        val usableWidth = (width - sidePad * 2f).coerceAtLeast(1f)
-
-        fun computeProgress(rawX: Float): Int {
-            val ratio = ((rawX - sidePad) / usableWidth).coerceIn(0f, 1f)
-            return (ratio * max + 0.5f).toInt().coerceIn(0, max)
-        }
-
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                parent?.requestDisallowInterceptTouchEvent(true)
-                isDragging = true
-                progress = computeProgress(event.x)
-                onStartScrub?.invoke()
-                onProgressScrub?.invoke(progress)
-                invalidate()
-                return true
-            }
-            MotionEvent.ACTION_MOVE -> {
-                if (isDragging) {
-                    progress = computeProgress(event.x)
-                    onProgressScrub?.invoke(progress)
-                    invalidate()
-                }
-                return true
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (isDragging) {
-                    progress = computeProgress(event.x)
-                    isDragging = false
-                    onStopScrub?.invoke(progress)
-                    invalidate()
-                }
-                parent?.requestDisallowInterceptTouchEvent(false)
-                return true
-            }
-        }
-        return super.onTouchEvent(event)
     }
 }
 
@@ -686,16 +352,26 @@ class MainActivity : Activity(), SensorEventListener {
     private var consecutiveErrorCount = 0
     private var lastErrorTimeMs = 0L
 
+    private lateinit var rootFrame: FrameLayout
+    private lateinit var overlayLayer: FrameLayout
     private lateinit var videoFrame: FrameLayout
+    private lateinit var stageMask: StageFrameView
     private lateinit var placeholder: LinearLayout
+    private lateinit var placeholderTitle: TextView
+    private lateinit var placeholderSub: TextView
+    private lateinit var placeholderButton: TextView
     private lateinit var centerHud: TextView
     private lateinit var fpsBadge: TextView
     private lateinit var titleView: TextView
-    private lateinit var playButton: TextView
-    private lateinit var seekBar: SeekBar
+    private lateinit var subtitleView: TextView
+    private lateinit var playButton: ImageView
+    private lateinit var seekBar: CinemaSeekBar
     private lateinit var currentTimeView: TextView
     private lateinit var durationView: TextView
-    private lateinit var fullscreenButton: TextView
+    private lateinit var fullscreenButton: ImageView
+    private lateinit var modeControl: SegmentedControl
+    private lateinit var stereoControl: SegmentedControl
+    private lateinit var hintView: TextView
 
     // Fullscreen Controls
     private lateinit var fullscreenTopBar: LinearLayout
@@ -704,6 +380,7 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var overlayPlayButton: ImageView
     private lateinit var overlaySeekBar: CinemaSeekBar
     private lateinit var fullscreenTitleView: TextView
+    private lateinit var fullscreenSubtitleView: TextView
     private lateinit var fullscreenCurrentTime: TextView
     private lateinit var fullscreenDuration: TextView
     private lateinit var rootLayout: LinearLayout
@@ -713,8 +390,10 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var overlayMotionButton: TextView
     private lateinit var overlayRotateButton: TextView
 
-    private val playVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PLAY, Color.rgb(14, 16, 22)) }
-    private val pauseVector by lazy { TransportIconDrawable(TransportIconDrawable.Type.PAUSE, Color.rgb(14, 16, 22)) }
+    private val brightnessGlyph by lazy { Glyph(Glyph.Kind.BRIGHTNESS, Pano.SUN) }
+    private val popoverViews = mutableListOf<View>()
+    private var errorDialog: Dialog? = null
+    private val fsInsets = intArrayOf(0, 0, 0, 0)
 
     private val fullscreenChrome = mutableListOf<View>()
     private var isFullscreen = false
@@ -845,6 +524,7 @@ class MainActivity : Activity(), SensorEventListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Pano.init(this)
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         showFpsEnabled = prefs.getBoolean(KEY_SHOW_FPS, false)
         showModeBadgeEnabled = prefs.getBoolean(KEY_SHOW_MODE_BADGE, false)
@@ -852,8 +532,8 @@ class MainActivity : Activity(), SensorEventListener {
 
         window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window.statusBarColor = Color.rgb(9, 10, 13)
-        window.navigationBarColor = Color.rgb(9, 10, 13)
+        window.statusBarColor = Pano.NIGHT
+        window.navigationBarColor = Pano.NIGHT
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
@@ -911,10 +591,7 @@ class MainActivity : Activity(), SensorEventListener {
 
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                playButton.text = if (isPlaying) "Ⅱ" else "▶"
-                if (::overlayPlayButton.isInitialized) {
-                    overlayPlayButton.setImageDrawable(if (isPlaying) pauseVector else playVector)
-                }
+                updatePlayIcons(isPlaying)
                 if (!isPlaying && ::fpsBadge.isInitialized) {
                     fpsBadge.text = "-- FPS"
                 }
@@ -930,10 +607,7 @@ class MainActivity : Activity(), SensorEventListener {
                     if (::fullscreenTitleView.isInitialized) fullscreenTitleView.text = resolvedName
                 }
                 if (playbackState == Player.STATE_ENDED) {
-                    playButton.text = "▶"
-                    if (::overlayPlayButton.isInitialized) {
-                        overlayPlayButton.setImageDrawable(playVector)
-                    }
+                    updatePlayIcons(false)
                     if (::fpsBadge.isInitialized) fpsBadge.text = "-- FPS"
                 }
             }
@@ -969,8 +643,8 @@ class MainActivity : Activity(), SensorEventListener {
                 }
 
                 showFullErrorDialog(error)
-                if (activePlaybackUri == null) {
-                    placeholder.visibility = View.VISIBLE
+                if (activePlaybackUri == null || placeholder.visibility == View.VISIBLE) {
+                    showPlaceholder(false)
                 }
             }
         })
@@ -1035,62 +709,37 @@ class MainActivity : Activity(), SensorEventListener {
             append(untruncatedTrace)
         }
 
-        val outer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(16), dp(18), dp(14))
-            background = rounded(Color.rgb(20, 23, 29), 18)
-        }
+        errorDialog?.dismiss()
+        val sheet = createSheet("Playback error", error.errorCodeName, Pano.DANGER)
 
-        val title = text("PLAYBACK ERROR LOG", 14f, Color.rgb(255, 79, 94), true).apply {
-            letterSpacing = 0.06f
-            setPadding(0, 0, 0, dp(10))
-        }
-        outer.addView(title)
-
-        val scrollView = ScrollView(this).apply {
+        val scroll = BoundedScrollView(this, (resources.displayMetrics.heightPixels * 0.42f).toInt()).apply {
             isVerticalScrollBarEnabled = true
-            background = rounded(Color.rgb(13, 15, 20), 12)
-            setPadding(dp(10), dp(10), dp(10), dp(10))
+            background = surface(Pano.NIGHT, 16f, Pano.HAIRLINE, 1f)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
         }
         val logText = TextView(this).apply {
             text = summary
-            textSize = 10.5f
-            setTextColor(Color.rgb(230, 234, 242))
+            textSize = 11f
+            setTextColor(Pano.withAlpha(Pano.TEXT, 0.88f))
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
         }
-        scrollView.addView(logText)
-        val maxScrollHeight = (resources.displayMetrics.heightPixels * 0.52f).toInt()
-        outer.addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxScrollHeight))
+        scroll.addView(logText)
+        sheet.content.addView(scroll, lp(MATCH, WRAP))
 
-        val dialog = AlertDialog.Builder(this)
-            .setView(outer)
-            .create()
-        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val copy = actionButton("Copy log", false) {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("PanoPlay Error", summary))
+            Toast.makeText(this@MainActivity, "Error log copied", Toast.LENGTH_SHORT).show()
+        }
+        val close = actionButton("Close", true) { sheet.dialog.dismiss() }
+        buttons.addView(copy, lp(0, dp(52), 1f).apply { rightMargin = dp(10) })
+        buttons.addView(close, lp(0, dp(52), 1f))
+        sheet.content.addView(buttons, lp(MATCH, WRAP).apply { topMargin = dp(16) })
 
-        val btnRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        val copyBtn = pillButton("COPY ERROR", false).apply {
-            setOnClickListener {
-                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                cm.setPrimaryClip(ClipData.newPlainText("PanoPlay Error", summary))
-                Toast.makeText(this@MainActivity, "Full error log copied", Toast.LENGTH_SHORT).show()
-            }
-        }
-        val closeBtn = pillButton("CLOSE", true).apply {
-            setOnClickListener { dialog.dismiss() }
-        }
-        btnRow.addView(copyBtn, LinearLayout.LayoutParams(0, dp(40), 1f).apply { rightMargin = dp(8) })
-        btnRow.addView(closeBtn, LinearLayout.LayoutParams(0, dp(40), 1f))
-        outer.addView(
-            btnRow,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(12)
-            }
-        )
-
-        dialog.show()
+        errorDialog = sheet.dialog
+        showSheet(sheet)
     }
 
     private fun performSafeSeek(targetMs: Long) {
@@ -1130,17 +779,7 @@ class MainActivity : Activity(), SensorEventListener {
             sensorManager.unregisterListener(this)
         }
         if (::overlayMotionButton.isInitialized) {
-            val textColor = if (enabled) Color.rgb(14, 16, 22) else Color.WHITE
-            overlayMotionButton.background = rounded(
-                if (enabled) Color.rgb(122, 146, 255) else Color.argb(145, 28, 32, 42),
-                22
-            )
-            overlayMotionButton.setTextColor(textColor)
-            setPillLeftIcon(
-                overlayMotionButton,
-                PillIconDrawable(PillIconDrawable.Type.MOTION, textColor),
-                textColor
-            )
+            stylePill(overlayMotionButton, enabled, Glyph.Kind.MOTION)
         }
     }
 
@@ -1257,31 +896,11 @@ class MainActivity : Activity(), SensorEventListener {
         lp.screenBrightness = clamped
         window.attributes = lp
 
-        showCenterHud("☀  $percent%")
+        showCenterHud("$percent%", 0L, brightnessGlyph)
     }
 
     private fun formatSpeedLabel(speed: Float): String =
         if (speed == 1.0f || speed == 2.0f) "${speed.toInt()}.0x" else "${speed}x"
-
-    private fun showSpeedPicker(anchor: View) {
-        val popup = PopupMenu(this, anchor)
-        speedSteps.forEachIndexed { index, speed ->
-            val label = formatSpeedLabel(speed)
-            val title = if (speed == currentSpeed) "✓  $label" else "     $label"
-            popup.menu.add(0, index, index, title)
-        }
-        popup.setOnMenuItemClickListener { item ->
-            val selected = speedSteps.getOrNull(item.itemId) ?: return@setOnMenuItemClickListener false
-            currentSpeed = selected
-            player.playbackParameters = PlaybackParameters(selected)
-            val label = formatSpeedLabel(selected)
-            speedButton.text = label
-            if (::overlaySpeedButton.isInitialized) overlaySpeedButton.text = label
-            showCenterHud(label, 800L)
-            true
-        }
-        popup.show()
-    }
 
     private fun toggleFullscreenOrientation() {
         if (!isFullscreen) return
@@ -1317,200 +936,105 @@ class MainActivity : Activity(), SensorEventListener {
 
     private fun openSettingsDialog() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(18), dp(22), dp(16))
-            background = rounded(Color.rgb(20, 23, 29), 18)
-        }
+        val sheet = createSheet("Settings")
+        val body = sheet.content
 
-        val dialogTitle = text("PLAYER SETTINGS", 14f, Color.WHITE, true).apply {
-            letterSpacing = 0.06f
-            setPadding(0, 0, 0, dp(14))
-        }
-        container.addView(dialogTitle)
-
-        // 1. Show Live FPS Toggle
-        val fpsRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = rounded(Color.rgb(28, 31, 38), 14)
-        }
-        val fpsTextCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        val fpsLabel = text("Show Live FPS", 13f, Color.WHITE, true)
-        val fpsSub = text("Display real-time frame rate on top-right", 10f, Color.rgb(152, 158, 170), false).apply {
-            setPadding(0, dp(3), 0, 0)
-        }
-        fpsTextCol.addView(fpsLabel)
-        fpsTextCol.addView(fpsSub)
-        fpsRow.addView(fpsTextCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-        val fpsSwitch = Switch(this).apply {
-            isChecked = showFpsEnabled
-            setOnCheckedChangeListener { _, isChecked ->
-                showFpsEnabled = isChecked
-                prefs.edit().putBoolean(KEY_SHOW_FPS, isChecked).apply()
+        body.addView(
+            toggleRow("Live frame rate", "Show the current frames per second on the video.", showFpsEnabled) { checked ->
+                showFpsEnabled = checked
+                prefs.edit().putBoolean(KEY_SHOW_FPS, checked).apply()
                 applyFpsVisibility()
-            }
-        }
-        fpsRow.addView(fpsSwitch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        container.addView(fpsRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        // 2. Show View Mode Badge Toggle
-        val modeBadgeRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = rounded(Color.rgb(28, 31, 38), 14)
-        }
-        val modeBadgeTextCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        val modeBadgeLabel = text("Show View Mode Badge", 13f, Color.WHITE, true)
-        val modeBadgeSub = text("Display 180° / 360° & Eye label on top-left", 10f, Color.rgb(152, 158, 170), false).apply {
-            setPadding(0, dp(3), 0, 0)
-        }
-        modeBadgeTextCol.addView(modeBadgeLabel)
-        modeBadgeTextCol.addView(modeBadgeSub)
-        modeBadgeRow.addView(modeBadgeTextCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-        val modeBadgeSwitch = Switch(this).apply {
-            isChecked = showModeBadgeEnabled
-            setOnCheckedChangeListener { _, isChecked ->
-                showModeBadgeEnabled = isChecked
-                prefs.edit().putBoolean(KEY_SHOW_MODE_BADGE, isChecked).apply()
-                applyModeBadgeVisibility()
-            }
-        }
-        modeBadgeRow.addView(modeBadgeSwitch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        container.addView(
-            modeBadgeRow,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(10)
-            }
+            },
+            lp(MATCH, WRAP)
         )
+        body.addView(divider(), lp(MATCH, dp(1)))
+        body.addView(
+            toggleRow("View badge", "Show the 180\u00B0 or 360\u00B0 view and the eye on the video.", showModeBadgeEnabled) { checked ->
+                showModeBadgeEnabled = checked
+                prefs.edit().putBoolean(KEY_SHOW_MODE_BADGE, checked).apply()
+                applyModeBadgeVisibility()
+            },
+            lp(MATCH, WRAP)
+        )
+        body.addView(divider(), lp(MATCH, dp(1)))
 
-        // 3. Free-Range 1ms Precision Audio Sync Offset (-1000ms to +1000ms)
-        val audioCard = LinearLayout(this).apply {
+        // Audio sync offset: -1000 ms to +1000 ms in 1 ms steps.
+        val audioBlock = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = rounded(Color.rgb(28, 31, 38), 14)
+            setPadding(0, dp(16), 0, dp(4))
         }
         val audioHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val audioTitle = text("Audio Sync Offset", 13f, Color.WHITE, true)
-        val audioValueText = text(formatOffsetLabel(audioOffsetMs), 12f, Color.rgb(255, 79, 94), true).apply {
-            gravity = Gravity.END
+        audioHeader.addView(tv("Audio sync", 15.5f, Pano.TEXT, Pano.medium), lp(0, WRAP, 1f))
+        val audioValue = tv(offsetText(audioOffsetMs), 14f, Pano.SUN, Pano.medium).apply {
+            fontFeatureSettings = "tnum"
         }
-        audioHeader.addView(audioTitle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        audioHeader.addView(audioValueText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        audioCard.addView(audioHeader)
+        audioHeader.addView(audioValue, lp(WRAP, WRAP))
+        audioBlock.addView(audioHeader, lp(MATCH, WRAP))
+        audioBlock.addView(
+            tv(
+                "Increase if the sound plays before the picture. Decrease if it lags behind.",
+                12.5f, Pano.MUTED, Pano.regular
+            ).apply { setLineSpacing(0f, 1.1f) },
+            lp(MATCH, WRAP).apply { topMargin = dp(4) }
+        )
 
-        val audioHint = text("Use +ms if audio plays before video  •  -ms if audio is late", 10f, Color.rgb(152, 158, 170), false).apply {
-            setPadding(0, dp(3), 0, dp(8))
-        }
-        audioCard.addView(audioHint)
-
-        val audioSeekBar = SeekBar(this).apply {
+        val slider = CinemaSeekBar(this).apply {
             max = 2000
+            centerOrigin = true
             progress = (audioOffsetMs + 1000).coerceIn(0, 2000)
-            progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(255, 79, 94))
-            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
-                    val newOffset = value - 1000
-                    audioOffsetMs = newOffset
-                    audioValueText.text = formatOffsetLabel(newOffset)
-                    if (fromUser) {
-                        prefs.edit().putInt(KEY_AUDIO_OFFSET_MS, newOffset).apply()
-                    }
-                }
-                override fun onStartTrackingTouch(bar: SeekBar?) {}
-                override fun onStopTrackingTouch(bar: SeekBar?) {
-                    if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
-                        performSafeSeek(player.currentPosition)
-                    }
-                }
-            })
         }
-        audioCard.addView(audioSeekBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30)))
 
-        fun applyExactOffset(targetMs: Int) {
-            val clamped = targetMs.coerceIn(-1000, 1000)
-            audioOffsetMs = clamped
-            audioSeekBar.progress = clamped + 1000
-            audioValueText.text = formatOffsetLabel(clamped)
-            prefs.edit().putInt(KEY_AUDIO_OFFSET_MS, clamped).apply()
+        fun commit(offset: Int) {
+            audioOffsetMs = offset
+            audioValue.text = offsetText(offset)
+        }
+
+        fun persistAndResync(offset: Int) {
+            prefs.edit().putInt(KEY_AUDIO_OFFSET_MS, offset).apply()
             if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
                 performSafeSeek(player.currentPosition)
             }
         }
 
-        fun stepChip(label: String, deltaMs: Int): TextView = text(label, 10f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(8), dp(6), dp(8), dp(6))
-            background = rounded(Color.rgb(42, 46, 56), 9)
-            setOnClickListener { applyExactOffset(audioOffsetMs + deltaMs) }
+        fun applyExact(target: Int) {
+            val clamped = target.coerceIn(-1000, 1000)
+            commit(clamped)
+            slider.progress = clamped + 1000
+            persistAndResync(clamped)
         }
 
-        val fineTuneRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val minus5 = stepChip("-5ms", -5)
-        val minus1 = stepChip("-1ms", -1)
-        val resetBtn = text("RESET", 10f, Color.rgb(255, 79, 94), true).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            background = rounded(Color.rgb(42, 46, 56), 9)
-            setOnClickListener { applyExactOffset(0) }
-        }
-        val plus1 = stepChip("+1ms", 1)
-        val plus5 = stepChip("+5ms", 5)
+        slider.onProgressScrub = { value -> commit(value - 1000) }
+        slider.onStopScrub = { value -> persistAndResync(value - 1000) }
+        audioBlock.addView(slider, lp(MATCH, dp(44)).apply {
+            leftMargin = -dp(12)
+            rightMargin = -dp(12)
+            topMargin = dp(6)
+        })
 
-        val chips = listOf(minus5, minus1, resetBtn, plus1, plus5)
-        chips.forEachIndexed { idx, chip ->
-            fineTuneRow.addView(
-                chip,
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    if (idx > 0) leftMargin = dp(4)
-                }
-            )
-        }
-        audioCard.addView(
-            fineTuneRow,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(6)
+        val steps = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val chipSpecs = listOf("\u22125 ms" to -5, "\u22121 ms" to -1, "Reset" to 0, "+1 ms" to 1, "+5 ms" to 5)
+        chipSpecs.forEachIndexed { index, (label, delta) ->
+            val isReset = delta == 0
+            val chip = tv(label, 13f, if (isReset) Pano.SUN else Pano.TEXT, Pano.medium).apply {
+                gravity = Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                background = ripple(Pano.HIGH, 100f, Pano.HAIRLINE, 1f)
+                pressFeedback(this, 0.95f)
+                setOnClickListener { applyExact(if (isReset) 0 else audioOffsetMs + delta) }
             }
-        )
-
-        container.addView(
-            audioCard,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(10)
-            }
-        )
-
-        val dialog = AlertDialog.Builder(this)
-            .setView(container)
-            .create()
-        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
-
-        val closeBtn = pillButton("DONE", true).apply {
-            setOnClickListener { dialog.dismiss() }
+            steps.addView(chip, lp(0, dp(40), 1f).apply { if (index > 0) leftMargin = dp(6) })
         }
-        container.addView(
-            closeBtn,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)).apply {
-                topMargin = dp(16)
-            }
-        )
+        audioBlock.addView(steps, lp(MATCH, WRAP).apply { topMargin = dp(8) })
+        body.addView(audioBlock, lp(MATCH, WRAP))
 
-        dialog.show()
+        body.addView(actionButton("Done", true) { sheet.dialog.dismiss() }, lp(MATCH, dp(54)).apply {
+            topMargin = dp(20)
+        })
+        showSheet(sheet)
     }
 
     private fun chooseVideoForMetadata() {
@@ -1681,78 +1205,50 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     private fun showMetadataDialog(fileName: String, rows: List<Pair<String, String?>>) {
-        val outer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(18), dp(20), dp(14))
-            background = rounded(Color.rgb(20, 23, 29), 18)
-        }
+        val sheet = createSheet("Video details", fileName)
 
-        val headerTitle = text("VIDEO METADATA", 14f, Color.WHITE, true).apply {
-            letterSpacing = 0.06f
+        val scroll = BoundedScrollView(this, (resources.displayMetrics.heightPixels * 0.5f).toInt()).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
         }
-        val fileLabel = text(fileName, 11f, Color.rgb(255, 79, 94), true).apply {
-            maxLines = 2
-            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-            setPadding(0, dp(4), 0, dp(12))
-        }
-        outer.addView(headerTitle)
-        outer.addView(fileLabel)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
-        val scrollView = ScrollView(this).apply {
-            isVerticalScrollBarEnabled = true
-        }
-        val listContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-
+        var firstSection = true
+        var previousWasRow = false
         rows.forEach { (key, value) ->
             if (value == null) {
-                val sectionHeader = text(key, 10f, Color.rgb(120, 235, 165), true).apply {
-                    letterSpacing = 0.08f
-                    setPadding(dp(4), dp(10), 0, dp(4))
-                }
-                listContainer.addView(sectionHeader)
-            } else {
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(12), dp(8), dp(12), dp(8))
-                    background = rounded(Color.rgb(28, 31, 38), 10)
-                }
-                val kView = text(key, 11f, Color.rgb(162, 168, 180), false)
-                val vView = text(value, 11f, Color.WHITE, true).apply {
-                    gravity = Gravity.END
-                }
-                row.addView(kView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.44f))
-                row.addView(vView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.56f))
-                listContainer.addView(
-                    row,
-                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                val sectionName = key.lowercase(Locale.US).replaceFirstChar { it.uppercase() }
+                list.addView(
+                    tv(sectionName, 13f, Pano.SUN, Pano.medium),
+                    lp(MATCH, WRAP).apply {
+                        topMargin = if (firstSection) dp(2) else dp(22)
                         bottomMargin = dp(4)
                     }
                 )
+                firstSection = false
+                previousWasRow = false
+            } else {
+                if (previousWasRow) list.addView(divider(), lp(MATCH, dp(1)))
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(12), 0, dp(12))
+                }
+                row.addView(tv(key, 14f, Pano.MUTED, Pano.regular), lp(0, WRAP, 0.44f))
+                row.addView(
+                    tv(value, 14f, Pano.TEXT, Pano.medium).apply { gravity = Gravity.END },
+                    lp(0, WRAP, 0.56f)
+                )
+                list.addView(row, lp(MATCH, WRAP))
+                previousWasRow = true
             }
         }
-
-        scrollView.addView(listContainer)
-        val maxScrollHeight = (resources.displayMetrics.heightPixels * 0.52f).toInt()
-        outer.addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxScrollHeight))
-
-        val dialog = AlertDialog.Builder(this)
-            .setView(outer)
-            .create()
-        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
-
-        val closeBtn = pillButton("CLOSE", true).apply {
-            setOnClickListener { dialog.dismiss() }
-        }
-        outer.addView(
-            closeBtn,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)).apply {
-                topMargin = dp(14)
-            }
-        )
-        dialog.show()
+        scroll.addView(list)
+        sheet.content.addView(scroll, lp(MATCH, WRAP))
+        sheet.content.addView(actionButton("Close", false) { sheet.dialog.dismiss() }, lp(MATCH, dp(52)).apply {
+            topMargin = dp(18)
+        })
+        showSheet(sheet)
     }
 
     private fun classifyResolutionTier(width: Int, height: Int): String {
@@ -1807,70 +1303,51 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     private fun buildInterface() {
+        val compact = resources.configuration.screenHeightDp < 700
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(9, 10, 13))
-            setPadding(dp(18), dp(8), dp(18), dp(10))
+            setBackgroundColor(Pano.NIGHT)
+            clipToPadding = false
+            clipChildren = false
+            setPadding(dp(20), dp(10), dp(20), dp(12))
         }
         rootLayout = root
-        normalRootPadding = intArrayOf(dp(18), dp(8), dp(18), dp(10))
+        normalRootPadding = intArrayOf(dp(20), dp(10), dp(20), dp(12))
 
+        // ── Header: mark, wordmark, three round actions ──
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val brandColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val brand = text("PANO PLAY", 18f, Color.WHITE, true).apply {
-            letterSpacing = 0.08f
+        val mark = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_XY
+            setImageDrawable(Glyph(Glyph.Kind.LENS, Pano.TEXT, Pano.SUN))
         }
-        val subtitle = text("YOUR VIDEOS. YOUR VIEW.", 9f, Color.rgb(142, 147, 157), true).apply {
-            letterSpacing = 0.12f
-            setPadding(0, dp(3), 0, 0)
-        }
-        brandColumn.addView(brand)
-        brandColumn.addView(subtitle)
-        header.addView(brandColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(mark, lp(dp(28), dp(28)).apply { rightMargin = dp(10) })
+        val brand = tv("panoplay", 22f, Pano.TEXT, Pano.display).apply { letterSpacing = -0.01f }
+        header.addView(brand, lp(0, WRAP, 1f))
 
-        val metadataButton = text("ℹ", 16f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            background = rounded(Color.rgb(31, 34, 41), 30)
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Inspect video metadata"
+        val infoButton = iconButton(Glyph.Kind.INFO, "Inspect a video's details").apply {
             setOnClickListener { chooseVideoForMetadata() }
         }
-        header.addView(
-            metadataButton,
-            LinearLayout.LayoutParams(dp(40), dp(40)).apply {
-                rightMargin = dp(6)
-            }
-        )
-
-        val settingsButton = text("⚙", 16f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            background = rounded(Color.rgb(31, 34, 41), 30)
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Settings"
+        val settingsButton = iconButton(Glyph.Kind.TUNE, "Settings").apply {
             setOnClickListener { openSettingsDialog() }
         }
-        header.addView(
-            settingsButton,
-            LinearLayout.LayoutParams(dp(40), dp(40)).apply {
-                rightMargin = dp(6)
-            }
-        )
-
-        val openButton = pillButton("＋  OPEN", true).apply {
+        val openButton = iconButton(
+            Glyph.Kind.PLUS, "Open a video", Pano.ON_SUN, Pano.SUN, 0, 10,
+            Pano.withAlpha(Pano.ON_SUN, 0.18f)
+        ).apply {
             setOnClickListener { chooseVideo() }
         }
-        header.addView(openButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)))
-        root.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
+        header.addView(infoButton, lp(dp(42), dp(42)).apply { rightMargin = dp(8) })
+        header.addView(settingsButton, lp(dp(42), dp(42)).apply { rightMargin = dp(8) })
+        header.addView(openButton, lp(dp(42), dp(42)))
+        root.addView(header, lp(MATCH, dp(56)))
         fullscreenChrome.add(header)
 
+        // ── Stage ──
         videoFrame = TapDetectFrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
-            clipToOutline = false
             onVideoDoubleTap = { x, _ -> handleDoubleTap(x) }
             onBrightnessSwipeStart = {
                 lastRenderedBrightnessPercent = -1
@@ -1886,10 +1363,7 @@ class MainActivity : Activity(), SensorEventListener {
         playerView = LayoutInflater.from(this).inflate(R.layout.video_player, videoFrame, false) as PlayerView
         playerView.player = player
         playerView.visibility = View.GONE
-        videoFrame.addView(
-            playerView,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        )
+        videoFrame.addView(playerView, FrameLayout.LayoutParams(MATCH, MATCH))
 
         vrSurfaceView = VrVideoSurfaceView(this).apply {
             setProjection(currentProjection)
@@ -1916,168 +1390,160 @@ class MainActivity : Activity(), SensorEventListener {
                 }
             }
         }
-        videoFrame.addView(
-            vrSurfaceView,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        )
+        videoFrame.addView(vrSurfaceView, FrameLayout.LayoutParams(MATCH, MATCH))
 
-        centerHud = text("☀  50%", 14f, Color.WHITE, true).apply {
+        // Empty state: the turning sphere, a headline and one clear action.
+        placeholder = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(24), dp(14), dp(24), dp(22))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(Color.BLACK, Color.rgb(15, 16, 36))
+            )
+            isClickable = true
+            isFocusable = true
+        }
+        placeholder.addView(GlobeView(this), lp(MATCH, 0, 1f))
+        placeholderTitle = tv("Open a video", 24f, Pano.TEXT, Pano.display).apply { gravity = Gravity.CENTER }
+        placeholderSub = tv("Flat, 180\u00B0 and 360\u00B0 videos from your phone.", 14f, Pano.MUTED, Pano.regular).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(18), dp(10), dp(18), dp(10))
-            background = rounded(Color.argb(115, 15, 17, 22), 24)
-            alpha = 0.88f
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.MIDDLE
+        }
+        placeholderButton = tv("Choose video", 15f, Pano.ON_SUN, Pano.medium).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(28), 0, dp(28), 0)
+            isClickable = true
+            isFocusable = true
+            background = ripple(Pano.SUN, 100f, 0, 0f, Pano.withAlpha(Pano.ON_SUN, 0.18f))
+            pressFeedback(this, 0.96f)
+            setOnClickListener { chooseVideo() }
+        }
+        placeholder.addView(placeholderTitle, lp(MATCH, WRAP).apply { topMargin = dp(6) })
+        placeholder.addView(placeholderSub, lp(MATCH, WRAP).apply { topMargin = dp(6) })
+        placeholder.addView(placeholderButton, lp(WRAP, dp(48)).apply { topMargin = dp(18) })
+        placeholder.setOnClickListener {
+            if (placeholderButton.visibility == View.VISIBLE) chooseVideo()
+        }
+        videoFrame.addView(placeholder, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        centerHud = tv("", 15f, Pano.TEXT, Pano.medium).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(11), dp(20), dp(11))
+            background = surface(Pano.withAlpha(Pano.NIGHT, 0.80f), 100f, Pano.HAIRLINE, 1f)
+            fontFeatureSettings = "tnum"
             elevation = dp(8).toFloat()
             visibility = View.GONE
         }
         videoFrame.addView(
             centerHud,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER
-            )
+            FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER)
         )
 
-        val viewBadge = text("180° VIEW · LEFT EYE", 10f, Color.WHITE, true).apply {
+        modeBadge = tv("", 11.5f, Pano.TEXT, Pano.medium).apply {
             setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = rounded(Color.argb(190, 15, 17, 22), 30)
+            background = surface(glassFill(), 100f, Pano.HAIRLINE, 1f)
             elevation = dp(4).toFloat()
             visibility = if (showModeBadgeEnabled) View.VISIBLE else View.GONE
         }
-        val badgeParams = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.TOP or Gravity.START
-        ).apply {
-            setMargins(dp(12), dp(12), 0, 0)
-        }
-        videoFrame.addView(viewBadge, badgeParams)
-        modeBadge = viewBadge
+        videoFrame.addView(
+            modeBadge,
+            FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.START).apply {
+                setMargins(dp(14), dp(14), 0, 0)
+            }
+        )
 
-        fpsBadge = text("-- FPS", 10f, Color.rgb(120, 235, 165), true).apply {
+        fpsBadge = tv("-- FPS", 11.5f, Pano.LAGOON, Pano.medium).apply {
             setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = rounded(Color.argb(190, 15, 17, 22), 30)
+            background = surface(glassFill(), 100f, Pano.HAIRLINE, 1f)
+            fontFeatureSettings = "tnum"
             elevation = dp(4).toFloat()
             visibility = if (showFpsEnabled) View.VISIBLE else View.GONE
         }
-        val fpsBadgeParams = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.TOP or Gravity.END
-        ).apply {
-            setMargins(0, dp(12), dp(12), 0)
-        }
-        videoFrame.addView(fpsBadge, fpsBadgeParams)
+        videoFrame.addView(
+            fpsBadge,
+            FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply {
+                setMargins(0, dp(14), dp(14), 0)
+            }
+        )
 
-        fullscreenButton = text("⛶", 22f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            background = rounded(Color.argb(205, 15, 17, 22), 30)
-            elevation = dp(5).toFloat()
-            setPadding(dp(10), dp(4), dp(10), dp(4))
-            setOnClickListener { toggleFullscreen() }
-            contentDescription = "Enter full screen"
-        }
-        val fullscreenParams = FrameLayout.LayoutParams(dp(46), dp(42), Gravity.BOTTOM or Gravity.END).apply {
-            setMargins(0, 0, dp(12), dp(12))
-        }
-        videoFrame.addView(fullscreenButton, fullscreenParams)
-
-        // 1. Fullscreen Top Bar
+        // ── Fullscreen: top bar ──
         fullscreenTopBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6), dp(10), dp(10), dp(10))
+            setPadding(dp(14), dp(10), dp(14), dp(24))
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.argb(175, 8, 10, 14), Color.TRANSPARENT)
+                intArrayOf(Color.argb(205, 6, 7, 14), Color.TRANSPARENT)
             )
             elevation = dp(4).toFloat()
             visibility = View.GONE
         }
-        val exitFullscreenBtn = text("←", 20f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Exit full screen"
+        val exitFullscreenBtn = iconButton(
+            Glyph.Kind.BACK, "Exit full screen", Pano.TEXT, Pano.withAlpha(Pano.NIGHT, 0.62f)
+        ).apply {
             setOnClickListener { if (isFullscreen) toggleFullscreen() }
         }
-        fullscreenTitleView = text("Now playing", 13.5f, Color.WHITE, true).apply {
+        val titleColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fullscreenTitleView = tv("Now playing", 16f, Pano.TEXT, Pano.display).apply {
             maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            ellipsize = TextUtils.TruncateAt.MIDDLE
         }
-        fullscreenTopBar.addView(exitFullscreenBtn, LinearLayout.LayoutParams(dp(34), dp(36)).apply {
-            rightMargin = dp(2)
-        })
-        fullscreenTopBar.addView(fullscreenTitleView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        fullscreenSubtitleView = tv("", 12f, Pano.MUTED, Pano.regular)
+        titleColumn.addView(fullscreenTitleView, lp(MATCH, WRAP))
+        titleColumn.addView(fullscreenSubtitleView, lp(MATCH, WRAP).apply { topMargin = dp(3) })
+        fullscreenTopBar.addView(exitFullscreenBtn, lp(dp(42), dp(42)).apply { rightMargin = dp(12) })
+        fullscreenTopBar.addView(titleColumn, lp(0, WRAP, 1f))
         videoFrame.addView(
             fullscreenTopBar,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP)
+            FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP)
         )
 
-        // 2. Fullscreen Center Transport Row
+        // ── Fullscreen: centre transport ──
         fullscreenCenterControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             elevation = dp(6).toFloat()
             visibility = View.GONE
         }
-        val centerRewind = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_XY
-            setImageDrawable(TransportIconDrawable(TransportIconDrawable.Type.REWIND, Color.WHITE))
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Rewind 10 seconds"
+        val centerRewind = iconButton(
+            Glyph.Kind.REPLAY10, "Back 10 seconds", Pano.TEXT, Pano.withAlpha(Pano.NIGHT, 0.62f), Pano.HAIRLINE, 14
+        ).apply {
             setOnClickListener { performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
         }
         overlayPlayButton = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_XY
-            setImageDrawable(playVector)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(Color.rgb(122, 146, 255))
-            }
+            setImageDrawable(Glyph(Glyph.Kind.PLAY, Pano.ON_SUN))
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = ripple(Pano.SUN, 100f, 0, 0f, Pano.withAlpha(Pano.ON_SUN, 0.18f))
             isClickable = true
             isFocusable = true
             contentDescription = "Play or pause"
-            setOnClickListener {
-                if (player.isPlaying) player.pause() else {
-                    if (player.playbackState == Player.STATE_ENDED) performSafeSeek(0L)
-                    player.play()
-                }
-            }
+            pressFeedback(this, 0.94f)
+            setOnClickListener { togglePlayback() }
         }
-        val centerForward = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_XY
-            setImageDrawable(TransportIconDrawable(TransportIconDrawable.Type.FORWARD, Color.WHITE))
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Forward 10 seconds"
+        val centerForward = iconButton(
+            Glyph.Kind.FORWARD10, "Forward 10 seconds", Pano.TEXT, Pano.withAlpha(Pano.NIGHT, 0.62f), Pano.HAIRLINE, 14
+        ).apply {
             setOnClickListener {
                 val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
                 performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-        fullscreenCenterControls.addView(centerRewind, LinearLayout.LayoutParams(dp(26), dp(22)).apply {
-            rightMargin = dp(28)
-        })
-        fullscreenCenterControls.addView(overlayPlayButton, LinearLayout.LayoutParams(dp(64), dp(64)))
-        fullscreenCenterControls.addView(centerForward, LinearLayout.LayoutParams(dp(26), dp(22)).apply {
-            leftMargin = dp(28)
-        })
+        fullscreenCenterControls.addView(centerRewind, lp(dp(60), dp(60)).apply { rightMargin = dp(28) })
+        fullscreenCenterControls.addView(overlayPlayButton, lp(dp(84), dp(84)))
+        fullscreenCenterControls.addView(centerForward, lp(dp(60), dp(60)).apply { leftMargin = dp(28) })
         videoFrame.addView(
             fullscreenCenterControls,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER)
         )
 
-        // 3. Fullscreen Bottom Dock
+        // ── Fullscreen: glass dock with seek bar and pills ──
         fullscreenBottomControls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(12), dp(14), dp(12), dp(18))
-            background = GradientDrawable(
-                GradientDrawable.Orientation.BOTTOM_TOP,
-                intArrayOf(Color.argb(190, 8, 10, 14), Color.TRANSPARENT)
-            )
+            setPadding(dp(16), dp(8), dp(16), dp(14))
+            background = surface(Pano.withAlpha(Pano.NIGHT, 0.82f), 28f, Pano.HAIRLINE, 1f)
             elevation = dp(4).toFloat()
             visibility = View.GONE
         }
@@ -2103,266 +1569,228 @@ class MainActivity : Activity(), SensorEventListener {
                 mainHandler.postDelayed(hideCenterHudRunnable, 350L)
             }
         }
-
+        fullscreenCurrentTime = tv("00:00", 12.5f, Pano.TEXT, Pano.regular).apply {
+            gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            fontFeatureSettings = "tnum"
+            minWidth = dp(40)
+        }
+        fullscreenDuration = tv("00:00", 12.5f, Pano.MUTED, Pano.regular).apply {
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            fontFeatureSettings = "tnum"
+            minWidth = dp(40)
+        }
         val fullscreenSeekRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        fullscreenCurrentTime = text("00:00", 11.5f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER_VERTICAL or Gravity.START
-            includeFontPadding = false
-        }
-        fullscreenDuration = text("00:00", 11.5f, Color.rgb(210, 214, 224), true).apply {
-            gravity = Gravity.CENTER_VERTICAL or Gravity.END
-            includeFontPadding = false
-        }
-        fullscreenSeekRow.addView(fullscreenCurrentTime, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
-            rightMargin = dp(5)
-        })
-        fullscreenSeekRow.addView(overlaySeekBar, LinearLayout.LayoutParams(0, dp(34), 1f))
-        fullscreenSeekRow.addView(fullscreenDuration, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
-            leftMargin = dp(5)
-        })
-        fullscreenBottomControls.addView(
-            fullscreenSeekRow,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
-        )
+        fullscreenSeekRow.addView(fullscreenCurrentTime, lp(WRAP, dp(40)))
+        fullscreenSeekRow.addView(overlaySeekBar, lp(0, dp(40), 1f))
+        fullscreenSeekRow.addView(fullscreenDuration, lp(WRAP, dp(40)))
+        fullscreenBottomControls.addView(fullscreenSeekRow, lp(MATCH, dp(40)))
 
         val bottomPillsScroller = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
-            setPadding(0, dp(10), 0, 0)
+            setPadding(0, dp(6), 0, 0)
         }
         val bottomPillsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        overlaySpeedButton = text("1.0x", 11.5f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            maxLines = 1
-            isSingleLine = true
-            setPadding(dp(13), dp(8), dp(14), dp(8))
-            background = rounded(Color.argb(145, 28, 32, 42), 22)
-            isClickable = true
-            isFocusable = true
-            setPillLeftIcon(this, PillIconDrawable(PillIconDrawable.Type.SPEED, Color.WHITE), Color.WHITE)
+        overlaySpeedButton = glassPill("1.0x", Glyph.Kind.SPEED).apply {
+            fontFeatureSettings = "tnum"
             setOnClickListener { showSpeedPicker(this) }
         }
-        overlayRecenterButton = text("Recenter", 11.5f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            maxLines = 1
-            isSingleLine = true
-            setPadding(dp(13), dp(8), dp(14), dp(8))
-            background = rounded(Color.argb(145, 28, 32, 42), 22)
-            isClickable = true
-            isFocusable = true
-            setPillLeftIcon(this, PillIconDrawable(PillIconDrawable.Type.RECENTER, Color.WHITE), Color.WHITE)
+        overlayRecenterButton = glassPill("Recenter", Glyph.Kind.RECENTER).apply {
             setOnClickListener {
                 if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
                     vrSurfaceView.resetView()
                 }
             }
         }
-        overlayMotionButton = text("Motion", 11.5f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            maxLines = 1
-            isSingleLine = true
-            setPadding(dp(13), dp(8), dp(14), dp(8))
-            background = rounded(Color.argb(145, 28, 32, 42), 22)
-            isClickable = true
-            isFocusable = true
-            setPillLeftIcon(this, PillIconDrawable(PillIconDrawable.Type.MOTION, Color.WHITE), Color.WHITE)
+        overlayMotionButton = glassPill("Motion", Glyph.Kind.MOTION).apply {
             setOnClickListener { setMotionTrackingEnabled(!isMotionEnabled) }
         }
-        overlayRotateButton = text("Landscape", 11.5f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            maxLines = 1
-            isSingleLine = true
-            setPadding(dp(14), dp(8), dp(14), dp(8))
-            background = rounded(Color.argb(145, 28, 32, 42), 22)
-            isClickable = true
-            isFocusable = true
+        overlayRotateButton = glassPill("Landscape", Glyph.Kind.ROTATE).apply {
             setOnClickListener { toggleFullscreenOrientation() }
         }
-
         val textPills = listOf(overlaySpeedButton, overlayRecenterButton, overlayMotionButton, overlayRotateButton)
         textPills.forEachIndexed { idx, pill ->
             bottomPillsRow.addView(
                 pill,
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(35)).apply {
-                    if (idx < textPills.lastIndex) rightMargin = dp(6)
-                }
+                lp(WRAP, dp(38)).apply { if (idx < textPills.lastIndex) rightMargin = dp(8) }
             )
         }
-        bottomPillsScroller.addView(
-            bottomPillsRow,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        )
-        fullscreenBottomControls.addView(
-            bottomPillsScroller,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        )
-
+        bottomPillsScroller.addView(bottomPillsRow, FrameLayout.LayoutParams(WRAP, WRAP))
+        fullscreenBottomControls.addView(bottomPillsScroller, lp(MATCH, WRAP))
         videoFrame.addView(
             fullscreenBottomControls,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
+            FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM).apply {
+                setMargins(dp(16), 0, dp(16), dp(14))
+            }
         )
 
-        placeholder = LinearLayout(this).apply {
+        // Rounded corners and hairline edge painted over the stage (portrait only).
+        stageMask = StageFrameView(this, dpf(26f), Pano.NIGHT)
+        videoFrame.addView(stageMask, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        root.addView(videoFrame, lp(MATCH, 0, 1f).apply { topMargin = dp(2) })
+
+        // ── Dock: title, progress, transport, view controls ──
+        val dock = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(28), dp(24), dp(28), dp(24))
-            background = rounded(Color.argb(205, 10, 12, 16), 18)
+            clipChildren = false
         }
-        val playGlyph = text("▶", 30f, Color.rgb(255, 83, 98), true).apply {
-            gravity = Gravity.CENTER
-        }
-        val placeholderTitle = text("CHOOSE A VIDEO", 16f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(14), 0, dp(6))
-        }
-        val placeholderSub = text("Open a file to start watching on your phone", 12f, Color.rgb(174, 179, 188), false).apply {
-            gravity = Gravity.CENTER
-        }
-        placeholder.addView(playGlyph)
-        placeholder.addView(placeholderTitle)
-        placeholder.addView(placeholderSub)
-        placeholder.setOnClickListener { chooseVideo() }
-        val placeholderParams = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.CENTER
-        ).apply {
-            setMargins(dp(32), 0, dp(32), 0)
-        }
-        videoFrame.addView(placeholder, placeholderParams)
 
-        root.addView(videoFrame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-
-        titleView = text("No video selected", 13f, Color.WHITE, true).apply {
+        titleView = tv("No video selected", 19f, Pano.TEXT, Pano.display).apply {
             maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
+            ellipsize = TextUtils.TruncateAt.END
         }
-        root.addView(titleView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(24)))
-        fullscreenChrome.add(titleView)
+        subtitleView = tv("Choose a video to begin", 13f, Pano.MUTED, Pano.regular).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        dock.addView(titleView, lp(MATCH, WRAP).apply { topMargin = dp(if (compact) 12 else 18) })
+        dock.addView(subtitleView, lp(MATCH, WRAP).apply { topMargin = dp(5) })
 
-        val modeRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, dp(8))
-        }
-        flatChip = modeChip("FLAT 2D", VrVideoSurfaceView.Projection.FLAT)
-        oneEightyChip = modeChip("180°", VrVideoSurfaceView.Projection.VR180)
-        threeSixtyChip = modeChip("360°", VrVideoSurfaceView.Projection.VR360)
-        modeRow.addView(flatChip, LinearLayout.LayoutParams(0, dp(42), 1f).apply { rightMargin = dp(5) })
-        modeRow.addView(oneEightyChip, LinearLayout.LayoutParams(0, dp(42), 1f).apply { leftMargin = dp(5); rightMargin = dp(5) })
-        modeRow.addView(threeSixtyChip, LinearLayout.LayoutParams(0, dp(42), 1f).apply { leftMargin = dp(5) })
-        root.addView(modeRow)
-        fullscreenChrome.add(modeRow)
-
-        val stereoRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(6))
-        }
-        monoChip = stereoChip("MONO", VrVideoSurfaceView.StereoLayout.MONO)
-        leftEyeChip = stereoChip("SBS LEFT", VrVideoSurfaceView.StereoLayout.SBS_LEFT)
-        rightEyeChip = stereoChip("SBS RIGHT", VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
-        stereoRow.addView(monoChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { rightMargin = dp(4) })
-        stereoRow.addView(leftEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
-        stereoRow.addView(rightEyeChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(4) })
-        root.addView(stereoRow)
-        fullscreenChrome.add(stereoRow)
-
-        val seekRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        currentTimeView = text("00:00", 10f, Color.rgb(184, 189, 198), false)
-        durationView = text("00:00", 10f, Color.rgb(184, 189, 198), false)
-        seekBar = SeekBar(this).apply {
+        seekBar = CinemaSeekBar(this).apply {
             max = 1000
-            progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(255, 79, 94))
-            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(73, 77, 85))
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onStartTrackingTouch(seekBar: SeekBar?) { isScrubbing = true }
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
-                    if (duration > 0L) {
-                        performSafeSeek((this@MainActivity.seekBar.progress / 1000f * duration).toLong())
-                    }
-                    isScrubbing = false
+            onStartScrub = { isScrubbing = true }
+            onProgressScrub = { value ->
+                val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
+                currentTimeView.text = formatTime((duration * value) / 1000L)
+            }
+            onStopScrub = { value ->
+                val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
+                if (duration > 0L) {
+                    performSafeSeek((value / 1000f * duration).toLong())
                 }
-                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    if (fromUser) {
-                        val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: knownTotalDurationMs
-                        currentTimeView.text = formatTime((duration * progress) / 1000L)
-                    }
-                }
-            })
+                isScrubbing = false
+            }
         }
-        currentTimeView.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-        currentTimeView.includeFontPadding = false
-        durationView.gravity = Gravity.CENTER_VERTICAL or Gravity.END
-        durationView.includeFontPadding = false
-        seekRow.addView(currentTimeView, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.MATCH_PARENT))
-        seekRow.addView(seekBar, LinearLayout.LayoutParams(0, dp(30), 1f))
-        seekRow.addView(durationView, LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.MATCH_PARENT))
-        root.addView(seekRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34)))
-        fullscreenChrome.add(seekRow)
+        dock.addView(seekBar, lp(MATCH, dp(40)).apply {
+            topMargin = dp(6)
+            leftMargin = -dp(8)
+            rightMargin = -dp(8)
+        })
+
+        val timeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        currentTimeView = tv("00:00", 12.5f, Pano.TEXT, Pano.regular).apply { fontFeatureSettings = "tnum" }
+        durationView = tv("00:00", 12.5f, Pano.MUTED, Pano.regular).apply {
+            gravity = Gravity.END
+            fontFeatureSettings = "tnum"
+        }
+        timeRow.addView(currentTimeView, lp(0, WRAP, 1f))
+        timeRow.addView(durationView, lp(0, WRAP, 1f))
+        dock.addView(timeRow, lp(MATCH, WRAP))
 
         val transport = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(4), 0, dp(5))
         }
-        speedButton = transportButton("1.0x").apply {
+        speedButton = tv("1.0x", 14f, Pano.TEXT, Pano.medium).apply {
+            gravity = Gravity.CENTER
+            fontFeatureSettings = "tnum"
+            background = ripple(Pano.RAISED, 100f, Pano.HAIRLINE, 1f)
+            contentDescription = "Playback speed"
+            isClickable = true
+            isFocusable = true
+            pressFeedback(this, 0.93f)
             setOnClickListener { showSpeedPicker(this) }
         }
-        val backButton = transportButton("-10s").apply {
+        val backButton = iconButton(
+            Glyph.Kind.REPLAY10, "Back 10 seconds", Pano.TEXT, Color.TRANSPARENT, 0, 10
+        ).apply {
             setOnClickListener { performSafeSeek((player.currentPosition - 10_000L).coerceAtLeast(0L)) }
         }
-        playButton = transportButton("▶", true).apply {
-            textSize = 20f
-            setOnClickListener {
-                if (player.isPlaying) player.pause() else {
-                    if (player.playbackState == Player.STATE_ENDED) performSafeSeek(0L)
-                    player.play()
-                }
-            }
+        playButton = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_XY
+            setImageDrawable(Glyph(Glyph.Kind.PLAY, Pano.ON_SUN))
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+            background = ripple(Pano.SUN, 100f, 0, 0f, Pano.withAlpha(Pano.ON_SUN, 0.18f))
+            contentDescription = "Play or pause"
+            isClickable = true
+            isFocusable = true
+            pressFeedback(this, 0.94f)
+            setOnClickListener { togglePlayback() }
         }
-        val forwardButton = transportButton("+10s").apply {
+        val forwardButton = iconButton(
+            Glyph.Kind.FORWARD10, "Forward 10 seconds", Pano.TEXT, Color.TRANSPARENT, 0, 10
+        ).apply {
             setOnClickListener {
                 val end = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: Long.MAX_VALUE
                 performSafeSeek((player.currentPosition + 10_000L).coerceAtMost(end))
             }
         }
-
-        transport.addView(speedButton, LinearLayout.LayoutParams(dp(46), dp(46)).apply {
-            leftMargin = dp(3); rightMargin = dp(3)
-        })
-        transport.addView(backButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
-            leftMargin = dp(3); rightMargin = dp(3)
-        })
-        transport.addView(playButton, LinearLayout.LayoutParams(dp(58), dp(46)).apply {
-            leftMargin = dp(3); rightMargin = dp(3)
-        })
-        transport.addView(forwardButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
-            leftMargin = dp(3); rightMargin = dp(3)
-        })
-        root.addView(transport)
-        fullscreenChrome.add(transport)
-
-        val hint = text("DRAG TO LOOK AROUND  •  PINCH TO ZOOM  •  L BRIGHTNESS", 9f, Color.rgb(119, 125, 136), true).apply {
-            gravity = Gravity.CENTER
-            letterSpacing = 0.035f
-            setPadding(0, dp(6), 0, dp(2))
+        fullscreenButton = iconButton(Glyph.Kind.FULLSCREEN, "Enter full screen", Pano.TEXT, Pano.RAISED, Pano.HAIRLINE, 12).apply {
+            setOnClickListener { toggleFullscreen() }
         }
-        root.addView(hint, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(22)))
-        fullscreenChrome.add(hint)
+        transport.addView(speedButton, lp(dp(46), dp(46)).apply { rightMargin = dp(8) })
+        transport.addView(backButton, lp(dp(54), dp(54)).apply { rightMargin = dp(8) })
+        transport.addView(playButton, lp(dp(70), dp(70)))
+        transport.addView(forwardButton, lp(dp(54), dp(54)).apply { leftMargin = dp(8) })
+        transport.addView(fullscreenButton, lp(dp(46), dp(46)).apply { leftMargin = dp(8) })
+        dock.addView(transport, lp(MATCH, WRAP).apply { topMargin = dp(if (compact) 2 else 6) })
 
-        setContentView(root)
+        modeControl = SegmentedControl(
+            this,
+            listOf(
+                SegmentedControl.Item("Flat", Glyph.Kind.FLAT),
+                SegmentedControl.Item("180\u00B0", Glyph.Kind.DOME180),
+                SegmentedControl.Item("360\u00B0", Glyph.Kind.SPHERE360)
+            )
+        ).apply {
+            contentDescription = "View mode"
+            onSelected = { index ->
+                setProjection(
+                    when (index) {
+                        0 -> VrVideoSurfaceView.Projection.FLAT
+                        1 -> VrVideoSurfaceView.Projection.VR180
+                        else -> VrVideoSurfaceView.Projection.VR360
+                    }
+                )
+            }
+        }
+        stereoControl = SegmentedControl(
+            this,
+            listOf(
+                SegmentedControl.Item("Mono", Glyph.Kind.MONO),
+                SegmentedControl.Item("Left eye", Glyph.Kind.SBS_LEFT),
+                SegmentedControl.Item("Right eye", Glyph.Kind.SBS_RIGHT)
+            )
+        ).apply {
+            contentDescription = "Stereo layout"
+            onSelected = { index ->
+                stereoLayout = when (index) {
+                    0 -> VrVideoSurfaceView.StereoLayout.MONO
+                    1 -> VrVideoSurfaceView.StereoLayout.SBS_LEFT
+                    else -> VrVideoSurfaceView.StereoLayout.SBS_RIGHT
+                }
+                vrSurfaceView.setStereoLayout(stereoLayout)
+                updateModeChips()
+                updateBadgeText()
+            }
+        }
+        dock.addView(modeControl, lp(MATCH, dp(50)).apply { topMargin = dp(if (compact) 10 else 16) })
+        dock.addView(stereoControl, lp(MATCH, dp(50)).apply { topMargin = dp(8) })
+
+        hintView = tv("", 12f, Pano.FAINT, Pano.regular).apply {
+            gravity = Gravity.CENTER
+            maxLines = 2
+            setLineSpacing(0f, 1.1f)
+            visibility = if (compact) View.GONE else View.VISIBLE
+        }
+        dock.addView(hintView, lp(MATCH, WRAP).apply { topMargin = dp(12) })
+
+        root.addView(dock, lp(MATCH, WRAP))
+        fullscreenChrome.add(dock)
+
+        rootFrame = FrameLayout(this).apply { setBackgroundColor(Pano.NIGHT) }
+        overlayLayer = FrameLayout(this)
+        rootFrame.addView(root, FrameLayout.LayoutParams(MATCH, MATCH))
+        rootFrame.addView(overlayLayer, FrameLayout.LayoutParams(MATCH, MATCH))
+        setContentView(rootFrame)
+
         root.setOnApplyWindowInsetsListener { view, insets ->
             val topInset: Int
             val bottomInset: Int
@@ -2378,41 +1806,29 @@ class MainActivity : Activity(), SensorEventListener {
                 topInset = top
                 bottomInset = bottom
             }
+            fsInsets.fill(0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                insets.displayCutout?.let { cutout ->
+                    fsInsets[0] = cutout.safeInsetLeft
+                    fsInsets[1] = cutout.safeInsetTop
+                    fsInsets[2] = cutout.safeInsetRight
+                    fsInsets[3] = cutout.safeInsetBottom
+                }
+            }
             if (isFullscreen) {
                 view.setPadding(0, 0, 0, 0)
+                applyFullscreenInsets()
             } else {
-                view.setPadding(dp(18), dp(8) + topInset, dp(18), dp(10) + bottomInset)
+                view.setPadding(dp(20), dp(10) + topInset, dp(20), dp(12) + bottomInset)
             }
             insets
         }
         root.requestApplyInsets()
         updateModeChips()
+        updateBadgeText()
     }
 
     private lateinit var modeBadge: TextView
-    private lateinit var flatChip: TextView
-    private lateinit var oneEightyChip: TextView
-    private lateinit var threeSixtyChip: TextView
-    private lateinit var monoChip: TextView
-    private lateinit var leftEyeChip: TextView
-    private lateinit var rightEyeChip: TextView
-
-    private fun stereoChip(label: String, layout: VrVideoSurfaceView.StereoLayout): TextView =
-        text(label, 10f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            setOnClickListener {
-                stereoLayout = layout
-                vrSurfaceView.setStereoLayout(layout)
-                updateModeChips()
-                updateBadgeText()
-            }
-        }
-
-    private fun modeChip(label: String, projection: VrVideoSurfaceView.Projection): TextView =
-        text(label, 12f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            setOnClickListener { setProjection(projection) }
-        }
 
     private fun setProjection(projection: VrVideoSurfaceView.Projection) {
         currentProjection = projection
@@ -2436,35 +1852,63 @@ class MainActivity : Activity(), SensorEventListener {
         updateModeChips()
     }
 
+    private fun eyeLabel(): String = when (stereoLayout) {
+        VrVideoSurfaceView.StereoLayout.MONO -> "Mono"
+        VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "Left eye"
+        VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "Right eye"
+    }
+
+    private fun modeSummary(): String = when (currentProjection) {
+        VrVideoSurfaceView.Projection.FLAT -> "Flat 2D"
+        VrVideoSurfaceView.Projection.VR180 -> "180\u00B0 \u00B7 ${eyeLabel()}"
+        VrVideoSurfaceView.Projection.VR360 -> "360\u00B0 \u00B7 ${eyeLabel()}"
+    }
+
     private fun updateBadgeText() {
         val projectionLabel = when (currentProjection) {
-            VrVideoSurfaceView.Projection.FLAT -> "FLAT 2D"
-            VrVideoSurfaceView.Projection.VR180 -> "180° VIEW"
-            VrVideoSurfaceView.Projection.VR360 -> "360° VIEW"
+            VrVideoSurfaceView.Projection.FLAT -> "Flat 2D"
+            VrVideoSurfaceView.Projection.VR180 -> "180\u00B0"
+            VrVideoSurfaceView.Projection.VR360 -> "360\u00B0"
         }
-        modeBadge.text = if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
-            val eyeLabel = when (stereoLayout) {
-                VrVideoSurfaceView.StereoLayout.MONO -> "MONO"
-                VrVideoSurfaceView.StereoLayout.SBS_LEFT -> "LEFT EYE"
-                VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> "RIGHT EYE"
-            }
-            "$projectionLabel · $eyeLabel"
-        } else {
-            projectionLabel
+        val badge = SpannableStringBuilder(projectionLabel)
+        if (currentProjection != VrVideoSurfaceView.Projection.FLAT) {
+            val start = badge.length
+            badge.append("  ").append(eyeLabel())
+            badge.setSpan(
+                ForegroundColorSpan(Pano.MUTED), start, badge.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
         }
+        modeBadge.text = badge
+        if (::subtitleView.isInitialized) {
+            subtitleView.text = if (currentVideoName.isBlank()) "Choose a video to begin" else modeSummary()
+        }
+        if (::fullscreenSubtitleView.isInitialized) fullscreenSubtitleView.text = modeSummary()
     }
 
     private fun updateModeChips() {
-        fun style(view: TextView, active: Boolean) {
-            view.background = rounded(if (active) Color.rgb(255, 79, 94) else Color.rgb(28, 31, 38), 12)
-            view.setTextColor(if (active) Color.WHITE else Color.rgb(188, 193, 202))
+        modeControl.select(
+            when (currentProjection) {
+                VrVideoSurfaceView.Projection.FLAT -> 0
+                VrVideoSurfaceView.Projection.VR180 -> 1
+                VrVideoSurfaceView.Projection.VR360 -> 2
+            }
+        )
+        stereoControl.select(
+            when (stereoLayout) {
+                VrVideoSurfaceView.StereoLayout.MONO -> 0
+                VrVideoSurfaceView.StereoLayout.SBS_LEFT -> 1
+                VrVideoSurfaceView.StereoLayout.SBS_RIGHT -> 2
+            }
+        )
+        // Eye selection only matters for 180° and 360°, so dim it for flat video.
+        val vr = currentProjection != VrVideoSurfaceView.Projection.FLAT
+        stereoControl.isEnabled = vr
+        stereoControl.animate().alpha(if (vr) 1f else 0.34f).setDuration(200L).start()
+        hintView.text = if (vr) {
+            "Drag to look around. Pinch to zoom. Swipe the left edge for brightness."
+        } else {
+            "Open full screen, then double-tap either side to skip 10 seconds."
         }
-        style(flatChip, currentProjection == VrVideoSurfaceView.Projection.FLAT)
-        style(oneEightyChip, currentProjection == VrVideoSurfaceView.Projection.VR180)
-        style(threeSixtyChip, currentProjection == VrVideoSurfaceView.Projection.VR360)
-        style(monoChip, stereoLayout == VrVideoSurfaceView.StereoLayout.MONO)
-        style(leftEyeChip, stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_LEFT)
-        style(rightEyeChip, stereoLayout == VrVideoSurfaceView.StereoLayout.SBS_RIGHT)
     }
 
     private fun chooseVideo() {
@@ -2499,7 +1943,7 @@ class MainActivity : Activity(), SensorEventListener {
         setProjection(VrVideoSurfaceView.Projection.VR180)
         titleView.text = currentVideoName
         if (::fullscreenTitleView.isInitialized) fullscreenTitleView.text = currentVideoName
-        placeholder.visibility = View.VISIBLE
+        showPlaceholder(true)
 
         val activeSurface = vrOutputSurface ?: vrSurfaceView.getVideoSurface()
         if (activeSurface != null && activeSurface.isValid) {
@@ -2555,10 +1999,11 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     private fun toggleFullscreen() {
+        dismissPopover()
         isFullscreen = !isFullscreen
         fullscreenControlsVisible = true
         fullscreenChrome.forEach { it.visibility = if (isFullscreen) View.GONE else View.VISIBLE }
-        fullscreenButton.visibility = if (isFullscreen) View.GONE else View.VISIBLE
+        stageMask.visibility = if (isFullscreen) View.GONE else View.VISIBLE
         val params = videoFrame.layoutParams as LinearLayout.LayoutParams
         if (isFullscreen) {
             normalVideoMargins[0] = params.topMargin
@@ -2575,9 +2020,9 @@ class MainActivity : Activity(), SensorEventListener {
             rootLayout.clipChildren = false
             window.setBackgroundDrawableResource(android.R.color.black)
             overlayRotateButton.text = "Landscape"
-            overlayPlayButton.setImageDrawable(if (player.isPlaying) pauseVector else playVector)
-            (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
-            (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(56)
+            updatePlayIcons(player.isPlaying)
+            (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(76) + fsInsets[1]
+            (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(76) + fsInsets[1]
             enterImmersiveMode()
         } else {
             if (isMotionEnabled) {
@@ -2595,12 +2040,13 @@ class MainActivity : Activity(), SensorEventListener {
                 normalRootPadding[0], normalRootPadding[1],
                 normalRootPadding[2], normalRootPadding[3]
             )
-            (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(12)
-            (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(12)
+            (modeBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(14)
+            (fpsBadge.layoutParams as FrameLayout.LayoutParams).topMargin = dp(14)
             fullscreenButton.contentDescription = "Enter full screen"
             exitImmersiveMode()
         }
         videoFrame.layoutParams = params
+        applyFullscreenInsets()
         if (isFullscreen) {
             (videoFrame as TapDetectFrameLayout).apply {
                 onVideoSingleTap = { setFullscreenControlsVisible(!fullscreenControlsVisible) }
@@ -2617,10 +2063,11 @@ class MainActivity : Activity(), SensorEventListener {
                 shouldIgnoreTap = null
             }
             fullscreenControlsVisible = false
-            fullscreenTopBar.visibility = View.GONE
-            fullscreenCenterControls.visibility = View.GONE
-            fullscreenBottomControls.visibility = View.GONE
-            fullscreenButton.visibility = View.VISIBLE
+            listOf(fullscreenTopBar, fullscreenCenterControls, fullscreenBottomControls).forEach {
+                it.animate().cancel()
+                it.alpha = 1f
+                it.visibility = View.GONE
+            }
             applyModeBadgeVisibility()
             applyFpsVisibility()
         }
@@ -2628,20 +2075,20 @@ class MainActivity : Activity(), SensorEventListener {
 
     private fun setFullscreenControlsVisible(visible: Boolean) {
         fullscreenControlsVisible = visible
-        val visibility = if (visible) View.VISIBLE else View.GONE
-        fullscreenTopBar.visibility = visibility
-        fullscreenCenterControls.visibility = visibility
-        fullscreenBottomControls.visibility = visibility
+        fade(fullscreenTopBar, visible)
+        fade(fullscreenCenterControls, visible)
+        fade(fullscreenBottomControls, visible)
         if (showModeBadgeEnabled) {
-            modeBadge.visibility = visibility
+            fade(modeBadge, visible)
         } else {
             modeBadge.visibility = View.GONE
         }
         if (showFpsEnabled) {
-            fpsBadge.visibility = visibility
+            fade(fpsBadge, visible)
         } else {
             fpsBadge.visibility = View.GONE
         }
+        if (!visible) dismissPopover()
     }
 
     @Suppress("DEPRECATION")
@@ -2677,6 +2124,10 @@ class MainActivity : Activity(), SensorEventListener {
 
     @Deprecated("Use OnBackInvokedDispatcher on newer Android versions")
     override fun onBackPressed() {
+        if (popoverViews.isNotEmpty()) {
+            dismissPopover()
+            return
+        }
         if (isFullscreen) {
             toggleFullscreen()
         } else {
@@ -2701,6 +2152,7 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     override fun onDestroy() {
+        errorDialog?.dismiss()
         sensorManager.unregisterListener(this)
         mainHandler.removeCallbacks(progressUpdater)
         mainHandler.removeCallbacks(hideCenterHudRunnable)
@@ -2710,37 +2162,345 @@ class MainActivity : Activity(), SensorEventListener {
         super.onDestroy()
     }
 
-    private fun transportButton(label: String, primary: Boolean = false): TextView =
-        text(label, if (primary) 16f else 11f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            background = rounded(if (primary) Color.rgb(255, 79, 94) else Color.rgb(28, 31, 38), 13)
-            isClickable = true
-            isFocusable = true
-        }
-
-    private fun pillButton(label: String, accent: Boolean): TextView =
-        text(label, 11f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(14), 0, dp(14), 0)
-            background = rounded(if (accent) Color.rgb(255, 79, 94) else Color.rgb(31, 34, 41), 30)
-            isClickable = true
-            isFocusable = true
-        }
-
-    private fun text(label: String, sizeSp: Float, color: Int, bold: Boolean): TextView = TextView(this).apply {
-        text = label
-        textSize = sizeSp
-        setTextColor(color)
-        typeface = if (bold) Typeface.create("sans-serif", Typeface.BOLD) else Typeface.create("sans-serif", Typeface.NORMAL)
-        includeFontPadding = false
-    }
-
-    private fun rounded(color: Int, radiusDp: Int): GradientDrawable = GradientDrawable().apply {
-        setColor(color)
-        cornerRadius = dp(radiusDp).toFloat()
-    }
+    // ───────────────────────── Design toolkit ─────────────────────────
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun dpf(value: Float): Float = value * resources.displayMetrics.density
+
+    private fun lp(width: Int, height: Int, weight: Float = 0f): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(width, height, weight)
+
+    private fun tv(text: CharSequence, sizeSp: Float, color: Int, face: Typeface = Pano.medium): TextView =
+        TextView(this).apply {
+            this.text = text
+            textSize = sizeSp
+            setTextColor(color)
+            typeface = face
+            includeFontPadding = false
+        }
+
+    private fun surface(
+        fill: Int,
+        radiusDp: Float,
+        strokeColor: Int = 0,
+        strokeDp: Float = 0f
+    ): GradientDrawable = GradientDrawable().apply {
+        setColor(fill)
+        cornerRadius = dpf(radiusDp)
+        if (strokeDp > 0f) setStroke(Math.max(1, dp(strokeDp.toInt())), strokeColor)
+    }
+
+    private fun ripple(
+        fill: Int,
+        radiusDp: Float,
+        strokeColor: Int = 0,
+        strokeDp: Float = 0f,
+        rippleColor: Int = Pano.withAlpha(Color.WHITE, 0.14f)
+    ): Drawable {
+        val content = surface(fill, radiusDp, strokeColor, strokeDp)
+        val mask = GradientDrawable().apply {
+            setColor(Color.WHITE)
+            cornerRadius = dpf(radiusDp)
+        }
+        return RippleDrawable(ColorStateList.valueOf(rippleColor), content, mask)
+    }
+
+    private fun glassFill(): Int = Pano.withAlpha(Pano.NIGHT, 0.74f)
+
+    /** Gentle press-in feedback; the touch listener never consumes, so clicks still fire. */
+    private fun pressFeedback(view: View, scale: Float = 0.92f) {
+        view.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> v.animate().scaleX(scale).scaleY(scale).setDuration(80L).start()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(140L).start()
+            }
+            false
+        }
+    }
+
+    private fun iconButton(
+        kind: Glyph.Kind,
+        description: String,
+        glyphTint: Int = Pano.TEXT,
+        fill: Int = Pano.RAISED,
+        strokeColor: Int = Pano.HAIRLINE,
+        padDp: Int = 10,
+        rippleColor: Int = Pano.withAlpha(Color.WHITE, 0.14f)
+    ): ImageView = ImageView(this).apply {
+        scaleType = ImageView.ScaleType.FIT_XY
+        setImageDrawable(Glyph(kind, glyphTint))
+        setPadding(dp(padDp), dp(padDp), dp(padDp), dp(padDp))
+        background = ripple(fill, 100f, strokeColor, if (strokeColor != 0) 1f else 0f, rippleColor)
+        contentDescription = description
+        isClickable = true
+        isFocusable = true
+        pressFeedback(this)
+    }
+
+    private fun actionButton(label: String, primary: Boolean, onClick: () -> Unit): TextView =
+        tv(label, 15f, if (primary) Pano.ON_SUN else Pano.TEXT, Pano.medium).apply {
+            gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
+            background = if (primary) {
+                ripple(Pano.SUN, 100f, 0, 0f, Pano.withAlpha(Pano.ON_SUN, 0.18f))
+            } else {
+                ripple(Pano.HIGH, 100f, Pano.HAIRLINE, 1f)
+            }
+            pressFeedback(this, 0.97f)
+            setOnClickListener { onClick() }
+        }
+
+    private fun stylePill(view: TextView, active: Boolean, kind: Glyph.Kind) {
+        val fg = if (active) Pano.ON_SUN else Pano.TEXT
+        view.setTextColor(fg)
+        view.background = if (active) {
+            ripple(Pano.SUN, 100f, 0, 0f, Pano.withAlpha(Pano.ON_SUN, 0.18f))
+        } else {
+            ripple(Pano.withAlpha(Pano.NIGHT, 0.72f), 100f, Pano.HAIRLINE, 1f)
+        }
+        setPillLeftIcon(view, Glyph(kind, fg), fg)
+    }
+
+    private fun glassPill(label: String, kind: Glyph.Kind): TextView =
+        tv(label, 13f, Pano.TEXT, Pano.medium).apply {
+            gravity = Gravity.CENTER
+            isSingleLine = true
+            setPadding(dp(14), 0, dp(16), 0)
+            isClickable = true
+            isFocusable = true
+            stylePill(this, false, kind)
+            pressFeedback(this, 0.95f)
+        }
+
+    private fun fade(view: View, show: Boolean) {
+        view.animate().cancel()
+        view.tag = show
+        if (show) {
+            if (view.visibility != View.VISIBLE) {
+                view.alpha = 0f
+                view.visibility = View.VISIBLE
+            }
+            view.animate().alpha(1f).setDuration(180L).start()
+        } else {
+            if (view.visibility != View.VISIBLE) return
+            view.animate().alpha(0f).setDuration(140L).withEndAction {
+                if (view.tag == false) {
+                    view.visibility = View.GONE
+                    view.alpha = 1f
+                }
+            }.start()
+        }
+    }
+
+    private fun updatePlayIcons(playing: Boolean) {
+        val kind = if (playing) Glyph.Kind.PAUSE else Glyph.Kind.PLAY
+        if (::playButton.isInitialized) playButton.setImageDrawable(Glyph(kind, Pano.ON_SUN))
+        if (::overlayPlayButton.isInitialized) overlayPlayButton.setImageDrawable(Glyph(kind, Pano.ON_SUN))
+    }
+
+    private fun togglePlayback() {
+        if (player.isPlaying) {
+            player.pause()
+        } else {
+            if (player.playbackState == Player.STATE_ENDED) performSafeSeek(0L)
+            player.play()
+        }
+    }
+
+    private fun offsetText(ms: Int): String = formatOffsetLabel(ms).replace('-', '\u2212')
+
+    private fun showPlaceholder(loading: Boolean) {
+        placeholder.visibility = View.VISIBLE
+        if (loading) {
+            placeholderTitle.text = "Preparing video"
+            placeholderSub.text = currentVideoName.ifBlank { "One moment" }
+            placeholderButton.visibility = View.GONE
+        } else {
+            placeholderTitle.text = "Open a video"
+            placeholderSub.text = "Flat, 180\u00B0 and 360\u00B0 videos from your phone."
+            placeholderButton.visibility = View.VISIBLE
+        }
+    }
+
+    // ───────────────────────── Sheets & popover ─────────────────────────
+
+    private class SheetHandle(val dialog: Dialog, val content: LinearLayout)
+
+    private fun createSheet(title: String, subtitle: String? = null, subtitleColor: Int = Pano.MUTED): SheetHandle {
+        val dialog = Dialog(this, R.style.PanoSheet)
+        val wrapper = FrameLayout(this)
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val r = dpf(28f)
+            background = GradientDrawable().apply {
+                setColor(Pano.RAISED)
+                cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+                setStroke(dp(1), Pano.HAIRLINE)
+            }
+            setPadding(dp(22), dp(10), dp(22), dp(24))
+        }
+        val grab = View(this).apply { background = surface(Pano.withAlpha(Pano.TEXT, 0.22f), 4f) }
+        sheet.addView(grab, lp(dp(40), dp(4)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            bottomMargin = dp(18)
+        })
+        sheet.addView(tv(title, 22f, Pano.TEXT, Pano.display), lp(MATCH, WRAP))
+        if (subtitle != null) {
+            val sub = tv(subtitle, 13f, subtitleColor, Pano.regular).apply {
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.MIDDLE
+            }
+            sheet.addView(sub, lp(MATCH, WRAP).apply { topMargin = dp(5) })
+        }
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        sheet.addView(body, lp(MATCH, WRAP).apply { topMargin = dp(14) })
+
+        val sheetWidth = Math.min(resources.displayMetrics.widthPixels, dp(560))
+        wrapper.addView(
+            sheet,
+            FrameLayout.LayoutParams(sheetWidth, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+        )
+        dialog.setContentView(wrapper)
+        dialog.window?.apply {
+            setLayout(MATCH, WRAP)
+            setGravity(Gravity.BOTTOM)
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.62f)
+        }
+        return SheetHandle(dialog, body)
+    }
+
+    private fun showSheet(sheet: SheetHandle) {
+        sheet.dialog.show()
+        if (isFullscreen) keepImmersive(sheet.dialog)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun keepImmersive(dialog: Dialog) {
+        val w = dialog.window ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            w.insetsController?.hide(WindowInsets.Type.systemBars())
+        } else {
+            w.decorView.systemUiVisibility = window.decorView.systemUiVisibility
+        }
+    }
+
+    private fun divider(): View = View(this).apply { setBackgroundColor(Pano.HAIRLINE) }
+
+    private fun toggleRow(title: String, sub: String, initial: Boolean, onChange: (Boolean) -> Unit): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(14), 0, dp(14))
+        }
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        column.addView(tv(title, 15.5f, Pano.TEXT, Pano.medium), lp(MATCH, WRAP))
+        column.addView(
+            tv(sub, 12.5f, Pano.MUTED, Pano.regular).apply { setLineSpacing(0f, 1.1f) },
+            lp(MATCH, WRAP).apply { topMargin = dp(3) }
+        )
+        row.addView(column, lp(0, WRAP, 1f).apply { rightMargin = dp(14) })
+        val toggle = PanoSwitch(this).apply {
+            setOn(initial, false)
+            onChanged = onChange
+        }
+        row.addView(toggle, lp(WRAP, WRAP))
+        row.isClickable = true
+        row.setOnClickListener { toggle.toggle() }
+        return row
+    }
+
+    private fun dismissPopover() {
+        if (popoverViews.isEmpty() || !::overlayLayer.isInitialized) return
+        popoverViews.forEach { overlayLayer.removeView(it) }
+        popoverViews.clear()
+    }
+
+    private fun applySpeed(speed: Float) {
+        currentSpeed = speed
+        player.playbackParameters = PlaybackParameters(speed)
+        val label = formatSpeedLabel(speed)
+        speedButton.text = label
+        if (::overlaySpeedButton.isInitialized) overlaySpeedButton.text = label
+        showCenterHud(label, 800L)
+    }
+
+    private fun showSpeedPicker(anchor: View) {
+        if (popoverViews.isNotEmpty()) {
+            dismissPopover()
+            return
+        }
+        val scrim = View(this).apply { setOnClickListener { dismissPopover() } }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = surface(Pano.withAlpha(Pano.RAISED, 0.96f), 26f, Pano.HAIRLINE, 1f)
+            elevation = dp(12).toFloat()
+        }
+        speedSteps.forEachIndexed { index, speed ->
+            val selected = speed == currentSpeed
+            val chip = tv(formatSpeedLabel(speed), 13.5f, if (selected) Pano.ON_SUN else Pano.TEXT, Pano.medium).apply {
+                gravity = Gravity.CENTER
+                fontFeatureSettings = "tnum"
+                isClickable = true
+                isFocusable = true
+                background = if (selected) {
+                    ripple(Pano.SUN, 100f, 0, 0f, Pano.withAlpha(Pano.ON_SUN, 0.18f))
+                } else {
+                    ripple(Color.TRANSPARENT, 100f)
+                }
+                setOnClickListener {
+                    applySpeed(speed)
+                    dismissPopover()
+                }
+            }
+            row.addView(chip, lp(dp(50), dp(40)).apply { if (index > 0) leftMargin = dp(2) })
+        }
+
+        overlayLayer.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
+        row.measure(
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val popW = row.measuredWidth
+        val popH = row.measuredHeight
+        val a = IntArray(2)
+        val o = IntArray(2)
+        anchor.getLocationInWindow(a)
+        rootFrame.getLocationInWindow(o)
+        val anchorCenterX = a[0] - o[0] + anchor.width / 2
+        val anchorTop = a[1] - o[1]
+        val left = (anchorCenterX - popW / 2).coerceIn(dp(12), Math.max(dp(12), rootFrame.width - popW - dp(12)))
+        var top = anchorTop - popH - dp(10)
+        if (top < dp(8)) top = anchorTop + anchor.height + dp(10)
+        overlayLayer.addView(row, FrameLayout.LayoutParams(popW, popH).apply {
+            gravity = Gravity.TOP or Gravity.START
+            leftMargin = left
+            topMargin = top
+        })
+        popoverViews.add(scrim)
+        popoverViews.add(row)
+        row.alpha = 0f
+        row.translationY = dpf(6f)
+        row.animate().alpha(1f).translationY(0f).setDuration(160L).start()
+    }
+
+    private fun applyFullscreenInsets() {
+        if (!::fullscreenTopBar.isInitialized) return
+        fullscreenTopBar.setPadding(
+            dp(14) + fsInsets[0], dp(10) + fsInsets[1], dp(14) + fsInsets[2], dp(24)
+        )
+        (fullscreenBottomControls.layoutParams as FrameLayout.LayoutParams).apply {
+            leftMargin = dp(16) + fsInsets[0]
+            rightMargin = dp(16) + fsInsets[2]
+            bottomMargin = dp(14) + fsInsets[3]
+        }
+        fullscreenBottomControls.requestLayout()
+    }
 
     private fun formatTime(milliseconds: Long): String {
         val totalSeconds = (milliseconds / 1000L).coerceAtLeast(0L)
