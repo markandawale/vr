@@ -87,6 +87,7 @@ import android.graphics.drawable.RippleDrawable
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextUtils
+import android.view.animation.DecelerateInterpolator
 import android.text.style.ForegroundColorSpan
 
 /**
@@ -2327,10 +2328,10 @@ class MainActivity : Activity(), SensorEventListener {
 
     // ───────────────────────── Sheets & popover ─────────────────────────
 
-    private class SheetHandle(val dialog: Dialog, val content: LinearLayout)
+    private class SheetHandle(val dialog: Dialog, val content: LinearLayout, val panel: View)
 
     private fun createSheet(title: String, subtitle: String? = null, subtitleColor: Int = Pano.MUTED): SheetHandle {
-        val dialog = Dialog(this, R.style.PanoSheet)
+        val dialog = Dialog(this, android.R.style.Theme_Material_Dialog_NoActionBar)
         val wrapper = FrameLayout(this)
         val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2370,10 +2371,17 @@ class MainActivity : Activity(), SensorEventListener {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
         }
-        return SheetHandle(dialog, body)
+        return SheetHandle(dialog, body, sheet)
     }
 
     private fun showSheet(sheet: SheetHandle) {
+        // Slide up from the bottom (done in code so no theme resources are needed).
+        sheet.panel.translationY = resources.displayMetrics.heightPixels.toFloat()
+        sheet.panel.animate()
+            .translationY(0f)
+            .setDuration(300L)
+            .setInterpolator(DecelerateInterpolator(2f))
+            .start()
         sheet.dialog.show()
         if (isFullscreen) keepImmersive(sheet.dialog)
     }
