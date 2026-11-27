@@ -1,12 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+    <!-- Dusk palette: indigo night, one sunrise-amber accent. -->
+    <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
-        <item name="android:colorAccent">#FF4F5E</item>
+        <item name="android:colorAccent">#FFB45E</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:statusBarColor">#090A0D</item>
-        <item name="android:navigationBarColor">#090A0D</item>
+        <item name="android:statusBarColor">#0D0E1B</item>
+        <item name="android:navigationBarColor">#0D0E1B</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:windowBackground">#090A0D</item>
+        <item name="android:windowBackground">#0D0E1B</item>
+    </style>
+
+    <!-- Bottom sheet used for settings, video details and the error log. -->
+    <style name="PanoSheet" parent="android:style/Theme.Material.Dialog.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:windowAnimationStyle">@style/PanoSheetAnimation</item>
+    </style>
+
+    <style name="PanoSheetAnimation" parent="@android:style/Animation">
+        <item name="android:windowEnterAnimation">@anim/sheet_in</item>
+        <item name="android:windowExitAnimation">@anim/sheet_out</item>
     </style>
 </resources>
